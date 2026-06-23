@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: knowsource-postgres
+    environment:
+      POSTGRES_DB: knowsource
+      POSTGRES_USER: knowsource
+      POSTGRES_PASSWORD: knowsource
+    ports:
+      - "15432:5432"
+    volumes:
+      - knowsource-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowsource -d knowsource"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  knowsource-postgres-data:

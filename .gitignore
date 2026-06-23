@@ -1,0 +1,12 @@
+target/
+.idea/
+.vscode/
+*.iml
+*.log
+
+.env
+!.env.example
+src/main/resources/application-local.yml
+
+hs_err_pid*
+replay_pid*

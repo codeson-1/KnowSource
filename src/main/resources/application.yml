@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: KnowSource
+  datasource:
+    url: ${KNOWSOURCE_DATASOURCE_URL:jdbc:postgresql://localhost:15432/knowsource}
+    username: ${KNOWSOURCE_DATASOURCE_USERNAME:knowsource}
+    password: ${KNOWSOURCE_DATASOURCE_PASSWORD:knowsource}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioSpeechAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioTranscriptionAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration
+  ai:
+    openai:
+      api-key: ${AI_DASHSCOPE_API_KEY:}
+      base-url: ${AI_DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode}
+      audio:
+        speech:
+          enabled: false
+        transcription:
+          enabled: false
+      image:
+        enabled: false
+      moderation:
+        enabled: false
+      chat:
+        options:
+          model: ${AI_DASHSCOPE_CHAT_MODEL:qwen-plus}
+      embedding:
+        options:
+          model: ${AI_DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+    vectorstore:
+      pgvector:
+        initialize-schema: false
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1024
+
+server:
+  port: ${SERVER_PORT:8080}
+
+knowsource:
+  spike:
+    enabled: ${KNOWSOURCE_SPIKE_ENABLED:false}
+  retrieval:
+    max-distance: ${KNOWSOURCE_RETRIEVAL_MAX_DISTANCE:0.8}
+  index:
+    syncing-timeout-seconds: ${KNOWSOURCE_INDEX_SYNCING_TIMEOUT_SECONDS:300}

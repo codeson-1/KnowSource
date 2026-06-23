@@ -25,7 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 public class DocumentService {
 
     private static final int MAX_TITLE_LENGTH = 256;
-    private static final Set<String> SUPPORTED_UPLOAD_EXTENSIONS = Set.of("txt", "md", "markdown");
+    private static final Set<String> SUPPORTED_UPLOAD_EXTENSIONS = Set.of("txt", "md", "markdown", "pdf", "doc", "docx");
 
     private final JdbcClient jdbcClient;
     private final DemoUserService demoUserService;
@@ -390,7 +390,7 @@ public class DocumentService {
         String originalFilename = file.getOriginalFilename();
         String extension = fileExtension(originalFilename);
         if (!SUPPORTED_UPLOAD_EXTENSIONS.contains(extension)) {
-            throw new IllegalArgumentException("Unsupported document file type. Supported types: txt, md, markdown.");
+            throw new IllegalArgumentException("Unsupported document file type. Supported types: txt, md, markdown, pdf, doc, docx.");
         }
 
         return new UploadedFile(
@@ -435,6 +435,12 @@ public class DocumentService {
     private String fileType(String extension) {
         if ("md".equals(extension) || "markdown".equals(extension)) {
             return "MARKDOWN";
+        }
+        if ("pdf".equals(extension)) {
+            return "PDF";
+        }
+        if ("doc".equals(extension) || "docx".equals(extension)) {
+            return "WORD";
         }
         return "TEXT";
     }

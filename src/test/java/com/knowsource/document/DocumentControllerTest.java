@@ -13,6 +13,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -175,20 +179,67 @@ class DocumentControllerTest {
     }
 
     @Test
-    void rejectsUnsupportedMultipartFileType() throws Exception {
+    void uploadsPdfDocumentAndIngestsWithTika() throws Exception {
+        String kbId = createKnowledgeBase("PDF KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "policy.pdf",
+                "application/pdf",
+                pdfBytes("Annual leave requires manager approval before the planned absence."));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Leave Policy"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.document.fileType").value("PDF"))
+                .andExpect(jsonPath("$.document.ossKey").value(startsWith("local://")))
+                .andExpect(jsonPath("$.ingestStatus").value("PENDING"))
+                .andReturn();
+
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestReady(docId);
+
+        mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(greaterThan(0))))
+                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("manager approval")));
+    }
+
+    @Test
+    void keepsDocumentAndMarksIngestFailedWhenPdfParsingFails() throws Exception {
         String kbId = createKnowledgeBase("Policy KB");
         MockMultipartFile file = new MockMultipartFile(
                 "file",
                 "policy.pdf",
                 "application/pdf",
-                "%PDF-1.4".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                "%PDF-1.4\n%%EOF".getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
-        mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
                         .file(file)
                         .param("title", "PDF Policy"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message")
-                        .value("Unsupported document file type. Supported types: txt, md, markdown."));
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.document.fileType").value("PDF"))
+                .andExpect(jsonPath("$.ingestStatus").value("PENDING"))
+                .andReturn();
+
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestStatus(docId, "FAILED");
+
+        mockMvc.perform(get("/api/documents/{docId}", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(docId))
+                .andExpect(jsonPath("$.fileType").value("PDF"));
+
+        mockMvc.perform(get("/api/documents/{docId}/ingest-task", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ingestStatus").value("FAILED"))
+                .andExpect(jsonPath("$.childChunkCount").value(0));
     }
 
     @Test
@@ -292,6 +343,24 @@ class DocumentControllerTest {
             Thread.sleep(50);
         }
         org.assertj.core.api.Assertions.fail("Timed out waiting for ingest task " + expectedStatus + " for " + docId);
+    }
+
+    private byte[] pdfBytes(String text) throws Exception {
+        try (PDDocument document = new PDDocument()) {
+            PDPage page = new PDPage();
+            document.addPage(page);
+            try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 12);
+                contentStream.newLineAtOffset(72, 720);
+                contentStream.showText(text);
+                contentStream.endText();
+            }
+            try (var output = new java.io.ByteArrayOutputStream()) {
+                document.save(output);
+                return output.toByteArray();
+            }
+        }
     }
 
 }

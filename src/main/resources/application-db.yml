@@ -1,6 +1,62 @@
 knowsource:
+  storage:
+    local:
+      root: ./target/test-sources
+  ingest:
+    max-file-size-bytes: 1048576
+  async:
+    ingest:
+      core-pool-size: 1
+      max-pool-size: 1
+      queue-capacity: 20
+    index:
+      core-pool-size: 1
+      max-pool-size: 1
+      queue-capacity: 20
+    chat:
+      core-pool-size: 1
+      max-pool-size: 1
+      queue-capacity: 20
+    trace:
+      core-pool-size: 1
+      max-pool-size: 1
+      queue-capacity: 20
+  ai:
+    http:
+      connect-timeout-millis: 100
+      read-timeout-millis: 100
+      stream-read-timeout-millis: 100
+    resilience:
+      chat:
+        limit-for-period: 1000
+        permission-timeout-millis: 0
+        bulkhead:
+          max-concurrent-calls: 20
+      embedding:
+        limit-for-period: 1000
+        permission-timeout-millis: 0
+        bulkhead:
+          max-concurrent-calls: 20
+        retry:
+          max-attempts: 3
+          wait-millis: 1
+      rerank:
+        limit-for-period: 1000
+        permission-timeout-millis: 0
+        bulkhead:
+          max-concurrent-calls: 20
+  rerank:
+    provider: none
   spike:
     enabled: false
+  index:
+    poller:
+      enabled: false
+    embedding-batch-size: 2
+    retry:
+      max-attempts: 5
+      initial-delay-seconds: 2
+      max-delay-seconds: 8
 
 spring:
   autoconfigure:

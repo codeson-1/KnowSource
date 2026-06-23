@@ -1,41 +1,58 @@
 package com.knowsource.document;
 
+import java.io.IOException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.Locale;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
-import com.knowsource.index.DocumentIndexOutboxService;
 import com.knowsource.user.DemoUserService;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
+import org.springframework.web.multipart.MultipartFile;
 
 @Service
 public class DocumentService {
 
     private static final int MAX_TITLE_LENGTH = 256;
+    private static final Set<String> SUPPORTED_UPLOAD_EXTENSIONS = Set.of("txt", "md", "markdown");
 
     private final JdbcClient jdbcClient;
     private final DemoUserService demoUserService;
     private final SimpleTextChunker textChunker;
+    private final SourceStorageService sourceStorageService;
+    private final DocumentTextExtractor documentTextExtractor;
     private final TransactionTemplate transactionTemplate;
-    private final DocumentIndexOutboxService indexOutboxService;
+    private final AsyncTaskExecutor ingestExecutor;
+    private final long maxFileSizeBytes;
 
     public DocumentService(
             JdbcClient jdbcClient,
             DemoUserService demoUserService,
             SimpleTextChunker textChunker,
+            SourceStorageService sourceStorageService,
+            DocumentTextExtractor documentTextExtractor,
             TransactionTemplate transactionTemplate,
-            DocumentIndexOutboxService indexOutboxService) {
+            @Qualifier("ingestExecutor") AsyncTaskExecutor ingestExecutor,
+            @Value("${knowsource.ingest.max-file-size-bytes:52428800}") long maxFileSizeBytes) {
         this.jdbcClient = jdbcClient;
         this.demoUserService = demoUserService;
         this.textChunker = textChunker;
+        this.sourceStorageService = sourceStorageService;
+        this.documentTextExtractor = documentTextExtractor;
         this.transactionTemplate = transactionTemplate;
-        this.indexOutboxService = indexOutboxService;
+        this.ingestExecutor = ingestExecutor;
+        this.maxFileSizeBytes = maxFileSizeBytes;
     }
 
     public DocumentIngestResponse ingest(String kbId, CreateDocumentRequest request) {
@@ -47,17 +64,38 @@ public class DocumentService {
         String docId = UUID.randomUUID().toString();
         String ingestTaskId = UUID.randomUUID().toString();
 
-        DocumentResponse document = createDocumentAndTask(kbId, userId, title, docId, ingestTaskId);
-
+        DocumentResponse document = createDocumentAndTask(
+                kbId, userId, title, docId, ingestTaskId, "inline://" + docId, "TEXT");
         try {
-            List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(content);
-            int childChunkCount = persistChunksAndMarkReady(docId, document.version(), ingestTaskId, parentChunks);
-
-            return new DocumentIngestResponse(document, ingestTaskId, "READY", parentChunks.size(), childChunkCount);
-        } catch (RuntimeException ex) {
+            ingestExecutor.execute(() -> parseAndPersistChunks(docId, document.version(), ingestTaskId, content));
+        } catch (TaskRejectedException ex) {
             markIngestFailed(ingestTaskId, ex);
             throw ex;
         }
+
+        return new DocumentIngestResponse(document, ingestTaskId, "PENDING", 0, 0);
+    }
+
+    public DocumentIngestResponse upload(String kbId, String title, MultipartFile file) {
+        long userId = demoUserService.currentUserId();
+        requireKbMember(kbId, userId);
+
+        UploadedFile upload = validateUpload(title, file);
+        String docId = UUID.randomUUID().toString();
+        String ingestTaskId = UUID.randomUUID().toString();
+        StoredSource storedSource = storeUploadedSource(kbId, docId, 1, upload, file);
+
+        DocumentResponse document = createDocumentAndTask(
+                kbId, userId, upload.title(), docId, ingestTaskId, storedSource.sourceKey(), upload.fileType());
+        try {
+            ingestExecutor.execute(() -> parseAndPersistStoredSource(
+                    docId, document.version(), ingestTaskId, document.ossKey(), document.fileType()));
+        } catch (TaskRejectedException ex) {
+            markIngestFailed(ingestTaskId, ex);
+            throw ex;
+        }
+
+        return new DocumentIngestResponse(document, ingestTaskId, "PENDING", 0, 0);
     }
 
     public List<DocumentResponse> listByKnowledgeBase(String kbId) {
@@ -108,19 +146,50 @@ public class DocumentService {
                 .list();
     }
 
+    public DocumentIngestResponse getLatestIngestTask(String docId) {
+        DocumentResponse document = getDocument(docId);
+        IngestTask task = jdbcClient.sql("""
+                SELECT id, status
+                FROM ingest_tasks
+                WHERE doc_id = :docId
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """)
+                .param("docId", docId)
+                .query(DocumentService::mapIngestTask)
+                .optional()
+                .orElseThrow(() -> new ResourceNotFoundException("Ingest task not found."));
+
+        long parentChunkCount = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_parents
+                WHERE doc_id = :docId AND doc_version = :docVersion
+                """)
+                .param("docId", docId)
+                .param("docVersion", document.version())
+                .query(Long.class)
+                .single();
+        long childChunkCount = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_children
+                WHERE doc_id = :docId AND doc_version = :docVersion
+                """)
+                .param("docId", docId)
+                .param("docVersion", document.version())
+                .query(Long.class)
+                .single();
+
+        return new DocumentIngestResponse(
+                document,
+                task.id(),
+                task.status(),
+                Math.toIntExact(parentChunkCount),
+                Math.toIntExact(childChunkCount));
+    }
+
     public DocumentPublishResponse publish(String docId) {
         long userId = demoUserService.currentUserId();
-        DocumentPublishResponse response = createPublishEvent(docId, userId);
-        indexOutboxService.processNextPendingEvent();
-        DocumentResponse document = getDocument(docId);
-
-        return new DocumentPublishResponse(
-                response.docId(),
-                response.kbId(),
-                response.version(),
-                document.indexStatus(),
-                response.eventId(),
-                publishMessage(document.indexStatus()));
+        return createPublishEvent(docId, userId);
     }
 
     private DocumentPublishResponse createPublishEvent(String docId, long userId) {
@@ -163,25 +232,33 @@ public class DocumentService {
         });
     }
 
-    private DocumentResponse createDocumentAndTask(String kbId, long userId, String title, String docId, String ingestTaskId) {
+    private DocumentResponse createDocumentAndTask(
+            String kbId,
+            long userId,
+            String title,
+            String docId,
+            String ingestTaskId,
+            String ossKey,
+            String fileType) {
         return transactionTemplate.execute(status -> {
             DocumentResponse document = jdbcClient.sql("""
                     INSERT INTO documents (id, kb_id, title, status, index_status, oss_key, version, file_type, created_by)
-                    VALUES (:id, :kbId, :title, 'DRAFT', 'NONE', :ossKey, 1, 'TEXT', :createdBy)
+                    VALUES (:id, :kbId, :title, 'DRAFT', 'NONE', :ossKey, 1, :fileType, :createdBy)
                     RETURNING id, kb_id, title, status, index_status, oss_key, version, file_type,
                               created_by, published_at, vectors_synced_at, created_at
                     """)
                     .param("id", docId)
                     .param("kbId", kbId)
                     .param("title", title)
-                    .param("ossKey", "inline://" + docId)
+                    .param("ossKey", ossKey)
+                    .param("fileType", fileType)
                     .param("createdBy", userId)
                     .query(DocumentService::mapDocument)
                     .single();
 
             jdbcClient.sql("""
                     INSERT INTO ingest_tasks (id, doc_id, status, started_at)
-                    VALUES (:id, :docId, 'PARSING', NOW())
+                    VALUES (:id, :docId, 'PENDING', NULL)
                     """)
                     .param("id", ingestTaskId)
                     .param("docId", docId)
@@ -207,6 +284,44 @@ public class DocumentService {
                     .update();
             return childChunkCount;
         });
+    }
+
+    private void parseAndPersistChunks(String docId, int docVersion, String ingestTaskId, String content) {
+        try {
+            markIngestParsing(ingestTaskId);
+            List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(content);
+            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks);
+        } catch (RuntimeException ex) {
+            markIngestFailed(ingestTaskId, ex);
+        }
+    }
+
+    private void parseAndPersistStoredSource(
+            String docId,
+            int docVersion,
+            String ingestTaskId,
+            String sourceKey,
+            String fileType) {
+        try {
+            markIngestParsing(ingestTaskId);
+            String content = normalizeContent(documentTextExtractor.extract(sourceKey, fileType));
+            List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(content);
+            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks);
+        } catch (IOException ex) {
+            markIngestFailed(ingestTaskId, new IllegalStateException("Failed to read source file.", ex));
+        } catch (RuntimeException ex) {
+            markIngestFailed(ingestTaskId, ex);
+        }
+    }
+
+    private void markIngestParsing(String ingestTaskId) {
+        transactionTemplate.executeWithoutResult(status -> jdbcClient.sql("""
+                UPDATE ingest_tasks
+                SET status = 'PARSING', started_at = NOW(), error_message = NULL
+                WHERE id = :id
+                """)
+                .param("id", ingestTaskId)
+                .update());
     }
 
     private void markIngestFailed(String ingestTaskId, RuntimeException ex) {
@@ -263,6 +378,71 @@ public class DocumentService {
         return childChunkIndex;
     }
 
+    private UploadedFile validateUpload(String title, MultipartFile file) {
+        String normalizedTitle = normalizeTitle(title);
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("Document file is required.");
+        }
+        if (file.getSize() > maxFileSizeBytes) {
+            throw new IllegalArgumentException("Document file exceeds the configured size limit.");
+        }
+
+        String originalFilename = file.getOriginalFilename();
+        String extension = fileExtension(originalFilename);
+        if (!SUPPORTED_UPLOAD_EXTENSIONS.contains(extension)) {
+            throw new IllegalArgumentException("Unsupported document file type. Supported types: txt, md, markdown.");
+        }
+
+        return new UploadedFile(
+                normalizedTitle,
+                StringUtils.hasText(originalFilename) ? originalFilename.trim() : "source." + extension,
+                normalizeContentType(file.getContentType()),
+                fileType(extension));
+    }
+
+    private StoredSource storeUploadedSource(
+            String kbId,
+            String docId,
+            int docVersion,
+            UploadedFile upload,
+            MultipartFile file) {
+        try (var inputStream = file.getInputStream()) {
+            return sourceStorageService.store(
+                    kbId,
+                    docId,
+                    docVersion,
+                    upload.originalFilename(),
+                    upload.contentType(),
+                    inputStream);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Failed to store document file.");
+        }
+    }
+
+    private String fileExtension(String originalFilename) {
+        if (!StringUtils.hasText(originalFilename)) {
+            throw new IllegalArgumentException("Document filename is required.");
+        }
+
+        String filename = originalFilename.trim();
+        int dotIndex = filename.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex == filename.length() - 1) {
+            throw new IllegalArgumentException("Document filename must include a supported extension.");
+        }
+        return filename.substring(dotIndex + 1).toLowerCase(Locale.ROOT);
+    }
+
+    private String fileType(String extension) {
+        if ("md".equals(extension) || "markdown".equals(extension)) {
+            return "MARKDOWN";
+        }
+        return "TEXT";
+    }
+
+    private String normalizeContentType(String contentType) {
+        return StringUtils.hasText(contentType) ? contentType.trim() : "application/octet-stream";
+    }
+
     private void requireKbMember(String kbId, long userId) {
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)
@@ -312,16 +492,6 @@ public class DocumentService {
         }
     }
 
-    private static String publishMessage(String indexStatus) {
-        if ("SYNCED".equals(indexStatus)) {
-            return "Document published and indexed.";
-        }
-        if ("FAILED".equals(indexStatus)) {
-            return "Document published but indexing failed.";
-        }
-        return "Document published; indexing is in progress.";
-    }
-
     private String normalizeTitle(String title) {
         if (!StringUtils.hasText(title)) {
             throw new IllegalArgumentException("Document title is required.");
@@ -367,6 +537,16 @@ public class DocumentService {
                 rs.getInt("chunk_index"),
                 (Integer) rs.getObject("page_number"),
                 rs.getString("chunk_type"));
+    }
+
+    private static IngestTask mapIngestTask(ResultSet rs, int rowNum) throws SQLException {
+        return new IngestTask(rs.getString("id"), rs.getString("status"));
+    }
+
+    private record IngestTask(String id, String status) {
+    }
+
+    private record UploadedFile(String title, String originalFilename, String contentType, String fileType) {
     }
 
     private static LocalDateTime toLocalDateTime(Timestamp timestamp) {

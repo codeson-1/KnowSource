@@ -5,14 +5,17 @@ import java.util.List;
 import java.util.Map;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/api")
@@ -32,6 +35,15 @@ public class DocumentController {
         return ResponseEntity.created(URI.create("/api/documents/" + response.document().id())).body(response);
     }
 
+    @PostMapping(value = "/kbs/{kbId}/documents/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<DocumentIngestResponse> upload(
+            @PathVariable String kbId,
+            @RequestParam String title,
+            @RequestParam("file") MultipartFile file) {
+        DocumentIngestResponse response = documentService.upload(kbId, title, file);
+        return ResponseEntity.created(URI.create("/api/documents/" + response.document().id())).body(response);
+    }
+
     @GetMapping("/kbs/{kbId}/documents")
     public List<DocumentResponse> listByKnowledgeBase(@PathVariable String kbId) {
         return documentService.listByKnowledgeBase(kbId);
@@ -45,6 +57,11 @@ public class DocumentController {
     @GetMapping("/documents/{docId}/chunks")
     public List<DocumentChunkResponse> listChunks(@PathVariable String docId) {
         return documentService.listChunks(docId);
+    }
+
+    @GetMapping("/documents/{docId}/ingest-task")
+    public DocumentIngestResponse getLatestIngestTask(@PathVariable String docId) {
+        return documentService.getLatestIngestTask(docId);
     }
 
     @PostMapping("/documents/{docId}/publish")

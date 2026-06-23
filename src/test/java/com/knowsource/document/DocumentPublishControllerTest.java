@@ -9,10 +9,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knowsource.index.DocumentEmbeddingGateway;
+import com.knowsource.index.DocumentIndexOutboxService;
 import com.knowsource.user.DemoUserInitializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,8 +46,12 @@ class DocumentPublishControllerTest {
     @org.springframework.beans.factory.annotation.Autowired
     private ObjectMapper objectMapper;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private DocumentIndexOutboxService indexOutboxService;
+
     @BeforeEach
     void cleanBusinessData() {
+        FakeEmbeddingConfig.reset();
         jdbcClient.sql("DELETE FROM qa_traces").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM vector_store").update();
@@ -60,7 +67,7 @@ class DocumentPublishControllerTest {
     }
 
     @Test
-    void publishCreatesOutboxEventAndIndexesDocumentVectors() throws Exception {
+    void publishCreatesPendingOutboxEventWithoutIndexingSynchronously() throws Exception {
         String kbId = createKnowledgeBase("HR KB");
         String docId = createDocument(kbId, "Leave Policy", "年假规则。审批流程。病假规则。");
 
@@ -75,9 +82,9 @@ class DocumentPublishControllerTest {
                 .andExpect(jsonPath("$.docId").value(docId))
                 .andExpect(jsonPath("$.kbId").value(kbId))
                 .andExpect(jsonPath("$.version").value(1))
-                .andExpect(jsonPath("$.indexStatus").value("SYNCED"))
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
                 .andExpect(jsonPath("$.eventId").isNotEmpty())
-                .andExpect(jsonPath("$.message").value("Document published and indexed."));
+                .andExpect(jsonPath("$.message").value("Document published; indexing is pending."));
 
         String documentStatus = jdbcClient.sql("SELECT status FROM documents WHERE id = :docId")
                 .param("docId", docId)
@@ -90,7 +97,60 @@ class DocumentPublishControllerTest {
         Long syncedAtCount = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM documents
-                WHERE id = :docId AND published_at IS NOT NULL AND vectors_synced_at IS NOT NULL
+                WHERE id = :docId AND published_at IS NOT NULL AND vectors_synced_at IS NULL
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long pendingEvents = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE doc_id = :docId AND doc_version = 1 AND event_type = 'PUBLISH' AND status = 'PENDING'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long childChunks = jdbcClient.sql("SELECT COUNT(*) FROM chunk_children WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long vectorRows = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM vector_store
+                WHERE kb_id = :kbId AND doc_id = :docId AND doc_version = 1 AND status = 'published'
+                """)
+                .param("kbId", kbId)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(documentStatus).isEqualTo("PUBLISHED");
+        assertThat(indexStatus).isEqualTo("PENDING");
+        assertThat(syncedAtCount).isEqualTo(1);
+        assertThat(pendingEvents).isEqualTo(1);
+        assertThat(childChunks).isPositive();
+        assertThat(vectorRows).isZero();
+    }
+
+    @Test
+    void outboxConsumerIndexesPendingPublishEvent() throws Exception {
+        String kbId = createKnowledgeBase("Outbox KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        String indexStatus = jdbcClient.sql("SELECT index_status FROM documents WHERE id = :docId")
+                .param("docId", docId)
+                .query(String.class)
+                .single();
+        Long syncedAtCount = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM documents
+                WHERE id = :docId AND vectors_synced_at IS NOT NULL
                 """)
                 .param("docId", docId)
                 .query(Long.class)
@@ -117,11 +177,92 @@ class DocumentPublishControllerTest {
                 .query(Long.class)
                 .single();
 
-        assertThat(documentStatus).isEqualTo("PUBLISHED");
         assertThat(indexStatus).isEqualTo("SYNCED");
         assertThat(syncedAtCount).isEqualTo(1);
         assertThat(doneEvents).isEqualTo(1);
         assertThat(vectorRows).isEqualTo(childChunks);
+    }
+
+    @Test
+    void outboxConsumerEmbedsDocumentChunksInConfiguredBatches() throws Exception {
+        String kbId = createKnowledgeBase("Batch KB");
+        String docId = createDocument(kbId, "Long Policy", "A".repeat(1_800));
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long childChunks = jdbcClient.sql("SELECT COUNT(*) FROM chunk_children WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long vectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(childChunks).isEqualTo(5);
+        assertThat(vectorRows).isEqualTo(childChunks);
+        assertThat(FakeEmbeddingConfig.batchSizes()).containsExactly(2, 2, 1);
+    }
+
+    @Test
+    void outboxFailureUsesConfiguredExponentialRetryBackoff() throws Exception {
+        String kbId = createKnowledgeBase("Retry KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+        FakeEmbeddingConfig.failNextEmbeddingRequests(2);
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long firstFailure = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE doc_id = :docId
+                  AND status = 'FAILED'
+                  AND attempt_count = 1
+                  AND next_retry_at > NOW() + INTERVAL '1 second'
+                  AND next_retry_at <= NOW() + INTERVAL '3 seconds'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        assertThat(firstFailure).isEqualTo(1);
+
+        jdbcClient.sql("""
+                UPDATE document_publish_events
+                SET next_retry_at = NOW()
+                WHERE doc_id = :docId
+                """)
+                .param("docId", docId)
+                .update();
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long secondFailure = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE doc_id = :docId
+                  AND status = 'FAILED'
+                  AND attempt_count = 2
+                  AND next_retry_at > NOW() + INTERVAL '3 seconds'
+                  AND next_retry_at <= NOW() + INTERVAL '5 seconds'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        String indexStatus = jdbcClient.sql("SELECT index_status FROM documents WHERE id = :docId")
+                .param("docId", docId)
+                .query(String.class)
+                .single();
+
+        assertThat(secondFailure).isEqualTo(1);
+        assertThat(indexStatus).isEqualTo("FAILED");
     }
 
     @Test
@@ -177,7 +318,9 @@ class DocumentPublishControllerTest {
 
         mockMvc.perform(post("/api/documents/{docId}/publish", docId))
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.indexStatus").value("SYNCED"));
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
 
         Long staleEvents = jdbcClient.sql("""
                 SELECT COUNT(*)
@@ -228,17 +371,69 @@ class DocumentPublishControllerTest {
                 .andReturn();
 
         JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
-        return body.path("document").path("id").asText();
+        String docId = body.path("document").path("id").asText();
+        waitForIngestReady(docId);
+        return docId;
+    }
+
+    private void waitForIngestReady(String docId) throws InterruptedException {
+        for (int i = 0; i < 40; i++) {
+            String status = jdbcClient.sql("""
+                    SELECT status
+                    FROM ingest_tasks
+                    WHERE doc_id = :docId
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """)
+                    .param("docId", docId)
+                    .query(String.class)
+                    .single();
+            if ("READY".equals(status)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        org.assertj.core.api.Assertions.fail("Timed out waiting for ingest task READY for " + docId);
     }
 
     @TestConfiguration
     static class FakeEmbeddingConfig {
 
+        private static final List<Integer> BATCH_SIZES = new CopyOnWriteArrayList<>();
+        private static final AtomicInteger FAILURES_REMAINING = new AtomicInteger();
+
         @Bean
         DocumentEmbeddingGateway documentEmbeddingGateway() {
-            return texts -> texts.stream()
-                    .map(FakeEmbeddingConfig::embedding)
-                    .toList();
+            return new DocumentEmbeddingGateway() {
+                @Override
+                public List<float[]> embed(List<String> texts) {
+                    return embedDocuments(texts);
+                }
+
+                @Override
+                public List<float[]> embedDocuments(List<String> texts) {
+                    BATCH_SIZES.add(texts.size());
+                    if (FAILURES_REMAINING.getAndUpdate(value -> Math.max(0, value - 1)) > 0) {
+                        throw new IllegalStateException("Synthetic embedding failure.");
+                    }
+                    return texts.stream()
+                            .map(FakeEmbeddingConfig::embedding)
+                            .toList();
+                }
+            };
+        }
+
+        static void reset() {
+            BATCH_SIZES.clear();
+            FAILURES_REMAINING.set(0);
+        }
+
+        static void failNextEmbeddingRequests(int count) {
+            FAILURES_REMAINING.set(count);
+        }
+
+        static List<Integer> batchSizes() {
+            return List.copyOf(BATCH_SIZES);
         }
 
         private static float[] embedding(String text) {

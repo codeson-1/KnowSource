@@ -4,21 +4,27 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.util.FileSystemUtils;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.mock.web.MockMultipartFile;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,6 +49,7 @@ class DocumentControllerTest {
 
     @BeforeEach
     void cleanBusinessData() {
+        FileSystemUtils.deleteRecursively(Path.of("target/test-sources").toFile());
         jdbcClient.sql("DELETE FROM qa_traces").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();
@@ -78,13 +85,21 @@ class DocumentControllerTest {
                 .andExpect(jsonPath("$.document.version").value(1))
                 .andExpect(jsonPath("$.document.fileType").value("TEXT"))
                 .andExpect(jsonPath("$.ingestTaskId").isNotEmpty())
-                .andExpect(jsonPath("$.ingestStatus").value("READY"))
-                .andExpect(jsonPath("$.parentChunkCount").value(greaterThan(0)))
-                .andExpect(jsonPath("$.childChunkCount").value(greaterThan(0)))
+                .andExpect(jsonPath("$.ingestStatus").value("PENDING"))
+                .andExpect(jsonPath("$.parentChunkCount").value(0))
+                .andExpect(jsonPath("$.childChunkCount").value(0))
                 .andReturn();
 
         JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
         String docId = body.path("document").path("id").asText();
+        waitForIngestReady(docId);
+
+        mockMvc.perform(get("/api/documents/{docId}/ingest-task", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.document.id").value(docId))
+                .andExpect(jsonPath("$.ingestStatus").value("READY"))
+                .andExpect(jsonPath("$.parentChunkCount").value(greaterThan(0)))
+                .andExpect(jsonPath("$.childChunkCount").value(greaterThan(0)));
 
         Long readyTasks = jdbcClient.sql("SELECT COUNT(*) FROM ingest_tasks WHERE doc_id = :docId AND status = 'READY'")
                 .param("docId", docId)
@@ -114,6 +129,66 @@ class DocumentControllerTest {
                 .andExpect(jsonPath("$", hasSize(1)))
                 .andExpect(jsonPath("$[0].title").value("Release Notes"))
                 .andExpect(jsonPath("$[0].status").value("DRAFT"));
+    }
+
+    @Test
+    void uploadsMultipartDocumentAndIngestsFromStoredSource() throws Exception {
+        String kbId = createKnowledgeBase("Durable Upload KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "runbook.md",
+                "text/markdown",
+                """
+                        # Runbook
+
+                        The service restart process must preserve source files before background parsing.
+                        Operators can retry ingestion because the worker reads from durable local storage.
+                        """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Restart Runbook"))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", startsWith("/api/documents/")))
+                .andExpect(jsonPath("$.document.id").isNotEmpty())
+                .andExpect(jsonPath("$.document.kbId").value(kbId))
+                .andExpect(jsonPath("$.document.title").value("Restart Runbook"))
+                .andExpect(jsonPath("$.document.status").value("DRAFT"))
+                .andExpect(jsonPath("$.document.indexStatus").value("NONE"))
+                .andExpect(jsonPath("$.document.fileType").value("MARKDOWN"))
+                .andExpect(jsonPath("$.document.ossKey").value(startsWith("local://")))
+                .andExpect(jsonPath("$.ingestStatus").value("PENDING"))
+                .andReturn();
+
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String docId = body.path("document").path("id").asText();
+        String sourceKey = body.path("document").path("ossKey").asText();
+        Path storedSource = Path.of("target/test-sources").resolve(sourceKey.substring("local://".length()));
+        org.assertj.core.api.Assertions.assertThat(Files.exists(storedSource)).isTrue();
+
+        waitForIngestReady(docId);
+
+        mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(greaterThan(0))))
+                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("durable local storage")));
+    }
+
+    @Test
+    void rejectsUnsupportedMultipartFileType() throws Exception {
+        String kbId = createKnowledgeBase("Policy KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "policy.pdf",
+                "application/pdf",
+                "%PDF-1.4".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "PDF Policy"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message")
+                        .value("Unsupported document file type. Supported types: txt, md, markdown."));
     }
 
     @Test
@@ -187,6 +262,36 @@ class DocumentControllerTest {
                 .andExpect(status().isCreated())
                 .andReturn();
 
-        return objectMapper.readTree(result.getResponse().getContentAsString()).path("document").path("id").asText();
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestReady(docId);
+        return docId;
     }
+
+    private void waitForIngestReady(String docId) throws InterruptedException {
+        waitForIngestStatus(docId, "READY");
+    }
+
+    private void waitForIngestStatus(String docId, String expectedStatus) throws InterruptedException {
+        for (int i = 0; i < 120; i++) {
+            String status = jdbcClient.sql("""
+                    SELECT status
+                    FROM ingest_tasks
+                    WHERE doc_id = :docId
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """)
+                    .param("docId", docId)
+                    .query(String.class)
+                    .single();
+            if (expectedStatus.equals(status)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        org.assertj.core.api.Assertions.fail("Timed out waiting for ingest task " + expectedStatus + " for " + docId);
+    }
+
 }

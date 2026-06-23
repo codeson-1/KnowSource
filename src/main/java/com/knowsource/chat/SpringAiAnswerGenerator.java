@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
+import com.knowsource.ai.AiProviderResilience;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.stereotype.Component;
@@ -13,14 +14,16 @@ import org.springframework.stereotype.Component;
 class SpringAiAnswerGenerator implements AnswerGenerator, StreamingAnswerGenerator {
 
     private final ChatClient chatClient;
+    private final AiProviderResilience aiProviderResilience;
 
-    SpringAiAnswerGenerator(ChatClient.Builder chatClientBuilder) {
+    SpringAiAnswerGenerator(ChatClient.Builder chatClientBuilder, AiProviderResilience aiProviderResilience) {
         this.chatClient = chatClientBuilder.build();
+        this.aiProviderResilience = aiProviderResilience;
     }
 
     @Override
     public String generate(String question, List<SourceCitation> sources) {
-        return chatClient.prompt()
+        return aiProviderResilience.executeChat(() -> chatClient.prompt()
                 .system("""
                         你是一个企业知识库问答助手。请严格基于给定上下文回答问题。
                         如果上下文不足以回答，只能回答“知识库中未找到相关信息。”。
@@ -33,12 +36,12 @@ class SpringAiAnswerGenerator implements AnswerGenerator, StreamingAnswerGenerat
                         用户问题：%s
                         """.formatted(context(sources), question))
                 .call()
-                .content();
+                .content());
     }
 
     @Override
     public void stream(String question, List<SourceCitation> sources, Consumer<String> tokenConsumer) {
-        chatClient.prompt()
+        aiProviderResilience.executeChat(() -> chatClient.prompt()
                 .system("""
                         你是一个企业知识库问答助手。请严格基于给定上下文回答问题。
                         如果上下文不足以回答，只能回答“知识库中未找到相关信息。”。
@@ -53,7 +56,7 @@ class SpringAiAnswerGenerator implements AnswerGenerator, StreamingAnswerGenerat
                 .stream()
                 .content()
                 .doOnNext(tokenConsumer)
-                .blockLast();
+                .blockLast());
     }
 
     private static String context(List<SourceCitation> sources) {

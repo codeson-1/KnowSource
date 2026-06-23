@@ -13,22 +13,29 @@ import org.springframework.util.StringUtils;
 @Service
 public class DocumentIndexOutboxService {
 
-    private static final int MAX_ATTEMPTS = 5;
-
     private final JdbcClient jdbcClient;
     private final VectorIndexService vectorIndexService;
     private final TransactionTemplate transactionTemplate;
     private final long syncingTimeoutSeconds;
+    private final int maxAttempts;
+    private final long initialRetryDelaySeconds;
+    private final long maxRetryDelaySeconds;
 
     public DocumentIndexOutboxService(
             JdbcClient jdbcClient,
             VectorIndexService vectorIndexService,
             TransactionTemplate transactionTemplate,
-            @Value("${knowsource.index.syncing-timeout-seconds:300}") long syncingTimeoutSeconds) {
+            @Value("${knowsource.index.syncing-timeout-seconds:300}") long syncingTimeoutSeconds,
+            @Value("${knowsource.index.retry.max-attempts:5}") int maxAttempts,
+            @Value("${knowsource.index.retry.initial-delay-seconds:30}") long initialRetryDelaySeconds,
+            @Value("${knowsource.index.retry.max-delay-seconds:300}") long maxRetryDelaySeconds) {
         this.jdbcClient = jdbcClient;
         this.vectorIndexService = vectorIndexService;
         this.transactionTemplate = transactionTemplate;
         this.syncingTimeoutSeconds = syncingTimeoutSeconds;
+        this.maxAttempts = Math.max(1, maxAttempts);
+        this.initialRetryDelaySeconds = Math.max(1L, initialRetryDelaySeconds);
+        this.maxRetryDelaySeconds = Math.max(this.initialRetryDelaySeconds, maxRetryDelaySeconds);
     }
 
     public boolean processNextPendingEvent() {
@@ -89,7 +96,7 @@ public class DocumentIndexOutboxService {
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                     """)
-                    .param("maxAttempts", MAX_ATTEMPTS)
+                    .param("maxAttempts", maxAttempts)
                     .query(DocumentIndexOutboxService::mapEvent)
                     .optional();
 
@@ -150,12 +157,21 @@ public class DocumentIndexOutboxService {
 
     private void markFailed(IndexEvent event, RuntimeException ex) {
         transactionTemplate.executeWithoutResult(status -> {
+            int currentAttemptCount = jdbcClient.sql("""
+                    SELECT attempt_count
+                    FROM document_publish_events
+                    WHERE id = :id
+                    """)
+                    .param("id", event.id())
+                    .query(Integer.class)
+                    .single();
+
             jdbcClient.sql("""
                     UPDATE document_publish_events
                     SET status = 'FAILED',
                         error_message = :errorMessage,
                         attempt_count = attempt_count + 1,
-                        next_retry_at = NOW() + INTERVAL '30 seconds',
+                        next_retry_at = NOW() + (:retryDelaySeconds * INTERVAL '1 second'),
                         locked_at = NULL,
                         locked_by = NULL,
                         updated_at = NOW()
@@ -163,6 +179,7 @@ public class DocumentIndexOutboxService {
                     """)
                     .param("id", event.id())
                     .param("errorMessage", failureMessage(ex))
+                    .param("retryDelaySeconds", retryDelaySeconds(currentAttemptCount))
                     .update();
 
             jdbcClient.sql("""
@@ -190,5 +207,16 @@ public class DocumentIndexOutboxService {
             return ex.getMessage();
         }
         return ex.getClass().getSimpleName();
+    }
+
+    private long retryDelaySeconds(int currentAttemptCount) {
+        long multiplier = 1L << Math.min(Math.max(0, currentAttemptCount), 30);
+        long delay;
+        try {
+            delay = Math.multiplyExact(initialRetryDelaySeconds, multiplier);
+        } catch (ArithmeticException ex) {
+            delay = Long.MAX_VALUE;
+        }
+        return Math.min(delay, maxRetryDelaySeconds);
     }
 }

@@ -2,10 +2,12 @@ package com.knowsource.index;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -17,14 +19,17 @@ public class VectorIndexService {
     private final JdbcClient jdbcClient;
     private final ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider;
     private final TransactionTemplate transactionTemplate;
+    private final int embeddingBatchSize;
 
     public VectorIndexService(
             JdbcClient jdbcClient,
             ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider,
-            TransactionTemplate transactionTemplate) {
+            TransactionTemplate transactionTemplate,
+            @Value("${knowsource.index.embedding-batch-size:16}") int embeddingBatchSize) {
         this.jdbcClient = jdbcClient;
         this.embeddingGatewayProvider = embeddingGatewayProvider;
         this.transactionTemplate = transactionTemplate;
+        this.embeddingBatchSize = normalizeBatchSize(embeddingBatchSize);
     }
 
     public boolean hasIndexingBackend() {
@@ -42,9 +47,7 @@ public class VectorIndexService {
             throw new IllegalStateException("Document has no chunks to index.");
         }
 
-        List<float[]> embeddings = embeddingGateway.embed(chunks.stream()
-                .map(ChunkForIndex::content)
-                .toList());
+        List<float[]> embeddings = embedInBatches(embeddingGateway, chunks);
 
         if (embeddings.size() != chunks.size()) {
             throw new IllegalStateException("Embedding result count does not match chunk count.");
@@ -78,6 +81,22 @@ public class VectorIndexService {
         return jdbcClient.sql("DELETE FROM vector_store WHERE doc_id = :docId")
                 .param("docId", docId)
                 .update();
+    }
+
+    private List<float[]> embedInBatches(DocumentEmbeddingGateway embeddingGateway, List<ChunkForIndex> chunks) {
+        List<float[]> embeddings = new ArrayList<>(chunks.size());
+        for (int start = 0; start < chunks.size(); start += embeddingBatchSize) {
+            int end = Math.min(start + embeddingBatchSize, chunks.size());
+            List<String> batchTexts = chunks.subList(start, end).stream()
+                    .map(ChunkForIndex::content)
+                    .toList();
+            List<float[]> batchEmbeddings = embeddingGateway.embedDocuments(batchTexts);
+            if (batchEmbeddings.size() != batchTexts.size()) {
+                throw new IllegalStateException("Embedding result count does not match chunk count.");
+            }
+            embeddings.addAll(batchEmbeddings);
+        }
+        return embeddings;
     }
 
     private List<ChunkForIndex> loadChunks(String docId, int docVersion) {
@@ -132,5 +151,9 @@ public class VectorIndexService {
 
     private static String jsonEscape(String value) {
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static int normalizeBatchSize(int batchSize) {
+        return Math.max(1, batchSize);
     }
 }

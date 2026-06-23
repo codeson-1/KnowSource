@@ -8,6 +8,7 @@ record ChatContext(
         long startedAtNanos,
         String kbId,
         String question,
+        RagProfile ragProfile,
         boolean refused,
         List<SourceCitation> sources,
         String fallbackAnswer,

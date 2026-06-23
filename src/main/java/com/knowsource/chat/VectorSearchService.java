@@ -4,6 +4,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 
+import com.knowsource.ai.AiProviderException;
 import com.knowsource.index.DocumentEmbeddingGateway;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,15 +20,21 @@ class VectorSearchService {
 
     private final JdbcClient jdbcClient;
     private final ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider;
+    private final DocumentReranker documentReranker;
     private final double maxDistance;
+    private final int candidateTopK;
 
     VectorSearchService(
             JdbcClient jdbcClient,
             ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider,
-            @Value("${knowsource.retrieval.max-distance:0.8}") double maxDistance) {
+            DocumentReranker documentReranker,
+            @Value("${knowsource.retrieval.max-distance:0.8}") double maxDistance,
+            @Value("${knowsource.retrieval.candidate-top-k:15}") int candidateTopK) {
         this.jdbcClient = jdbcClient;
         this.embeddingGatewayProvider = embeddingGatewayProvider;
+        this.documentReranker = documentReranker;
         this.maxDistance = maxDistance;
+        this.candidateTopK = normalizeCandidateTopK(candidateTopK);
     }
 
     List<RetrievedChunk> search(String kbId, String question, Integer requestedTopK) {
@@ -38,12 +45,17 @@ class VectorSearchService {
 
         String normalizedQuestion = normalizeQuestion(question);
         int topK = normalizeTopK(requestedTopK);
-        List<float[]> embeddings = embeddingGateway.embed(List.of(normalizedQuestion));
+        List<float[]> embeddings;
+        try {
+            embeddings = embeddingGateway.embedQuery(normalizedQuestion);
+        } catch (AiProviderException ex) {
+            return List.of();
+        }
         if (embeddings.size() != 1) {
             throw new IllegalStateException("Embedding result count does not match query count.");
         }
 
-        return jdbcClient.sql("""
+        List<RetrievedChunk> candidates = jdbcClient.sql("""
                 SELECT
                     vs.metadata ->> 'chunkId' AS chunk_id,
                     vs.doc_id,
@@ -75,9 +87,10 @@ class VectorSearchService {
                 .param("kbId", kbId)
                 .param("queryEmbedding", vectorLiteral(embeddings.getFirst()))
                 .param("maxDistance", maxDistance)
-                .param("topK", topK)
+                .param("topK", Math.max(topK, candidateTopK))
                 .query(VectorSearchService::mapChunk)
                 .list();
+        return documentReranker.rerank(normalizedQuestion, candidates, topK);
     }
 
     private static RetrievedChunk mapChunk(ResultSet rs, int rowNum) throws SQLException {
@@ -111,6 +124,13 @@ class VectorSearchService {
             throw new IllegalArgumentException("topK must be between 1 and 15.");
         }
         return topK;
+    }
+
+    private static int normalizeCandidateTopK(int candidateTopK) {
+        if (candidateTopK < DEFAULT_TOP_K) {
+            return DEFAULT_TOP_K;
+        }
+        return Math.min(candidateTopK, MAX_TOP_K);
     }
 
     private static String vectorLiteral(float[] embedding) {

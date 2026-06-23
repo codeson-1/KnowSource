@@ -6,6 +6,7 @@ public record ChatResponse(
         String qaTraceId,
         String kbId,
         String question,
+        String ragProfile,
         String answer,
         boolean refused,
         List<SourceCitation> sources) {

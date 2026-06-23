@@ -15,12 +15,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.knowsource.ai.AiProviderException;
 import com.knowsource.index.DocumentEmbeddingGateway;
+import com.knowsource.index.DocumentIndexOutboxService;
 import com.knowsource.user.DemoUserInitializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,8 +55,12 @@ class ChatControllerTest {
     @org.springframework.beans.factory.annotation.Autowired
     private ObjectMapper objectMapper;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private DocumentIndexOutboxService indexOutboxService;
+
     @BeforeEach
     void cleanBusinessData() {
+        FakeEmbeddingConfig.reset();
         jdbcClient.sql("DELETE FROM qa_traces").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM vector_store").update();
@@ -87,6 +95,7 @@ class ChatControllerTest {
                 .andExpect(jsonPath("$.qaTraceId").value(not("")))
                 .andExpect(jsonPath("$.kbId").value(kbId))
                 .andExpect(jsonPath("$.question").value("How many annual leave days are available?"))
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
                 .andExpect(jsonPath("$.refused").value(false))
                 .andExpect(jsonPath("$.answer").value(startsWith("已检索到相关知识片段")))
                 .andExpect(jsonPath("$.sources", hasSize(1)))
@@ -120,6 +129,95 @@ class ChatControllerTest {
                 .query(Long.class)
                 .single();
         assertThat(traceCount).isEqualTo(1);
+        assertThat(FakeEmbeddingConfig.queryEmbeddingCalls()).isGreaterThanOrEqualTo(1);
+        assertThat(FakeEmbeddingConfig.documentEmbeddingCalls()).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    void routesExplicitAutoProfileToNaiveForCurrentSingleTurnFlow() throws Exception {
+        String kbId = createKnowledgeBase("Profile KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "profile": "auto"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
+                .andExpect(jsonPath("$.sources", hasSize(1)))
+                .andReturn();
+
+        String traceId = objectMapper.readTree(result.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        String ragProfile = jdbcClient.sql("SELECT rag_profile FROM qa_traces WHERE id = :traceId")
+                .param("traceId", traceId)
+                .query(String.class)
+                .single();
+        assertThat(ragProfile).isEqualTo("naive");
+    }
+
+    @Test
+    void acceptsExplicitNaiveProfile() throws Exception {
+        String kbId = createKnowledgeBase("Naive Profile KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "profile": "NAIVE"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
+                .andExpect(jsonPath("$.sources[0].docId").value(docId));
+    }
+
+    @Test
+    void reranksRoughVectorCandidatesBeforeApplyingRequestedTopK() throws Exception {
+        String kbId = createKnowledgeBase("Rerank KB");
+        String genericDocId = createDocument(kbId, "Generic Leave Policy",
+                "Leave policy says employees submit requests through the HR portal.");
+        String annualDocId = createDocument(kbId, "Annual Leave Policy",
+                "Annual leave is 10 days. Approval is required.");
+        publishDocument(genericDocId);
+        publishDocument(annualDocId);
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "topK": 1
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refused").value(false))
+                .andExpect(jsonPath("$.sources", hasSize(1)))
+                .andExpect(jsonPath("$.sources[0].docId").value(annualDocId))
+                .andExpect(jsonPath("$.sources[0].snippet").value("Annual leave is 10 days. Approval is required."))
+                .andReturn();
+
+        String traceId = objectMapper.readTree(result.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        Long tracedSources = jdbcClient.sql("""
+                SELECT jsonb_array_length(retrieved_chunks)
+                FROM qa_traces
+                WHERE id = :traceId
+                """)
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(tracedSources).isEqualTo(1);
     }
 
     @Test
@@ -147,7 +245,9 @@ class ChatControllerTest {
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("event:token")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("event:done")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("\"qaTraceId\":\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"ragProfile\":\"naive\"")))
                 .andReturn();
+        assertThat(FakeEmbeddingConfig.streamingThreadName()).startsWith("chat-");
 
         String traceId = extractTraceId(dispatched.getResponse().getContentAsString());
         waitForTrace(traceId);
@@ -165,6 +265,82 @@ class ChatControllerTest {
                 .query(Long.class)
                 .single();
         assertThat(tracedStreams).isEqualTo(1);
+    }
+
+    @Test
+    void streamGenerationFailureFallsBackWithSourcesAndTrace() throws Exception {
+        String kbId = createKnowledgeBase("Chat Failure KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+        FakeEmbeddingConfig.failChatGeneration();
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat/stream", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?"
+                                }
+                                """))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        MvcResult dispatched = mockMvc.perform(asyncDispatch(result))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"docId\":\"" + docId + "\"")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("AI")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("event:done")))
+                .andReturn();
+
+        String traceId = extractTraceId(dispatched.getResponse().getContentAsString());
+        waitForTrace(traceId);
+
+        Long tracedFallback = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM qa_traces
+                WHERE id = :traceId
+                  AND answer LIKE '%AI%'
+                  AND jsonb_array_length(retrieved_chunks) = 1
+                """)
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(tracedFallback).isEqualTo(1);
+    }
+
+    @Test
+    void queryEmbeddingFailureFallsBackToEmptyContextRefusal() throws Exception {
+        String kbId = createKnowledgeBase("Embedding Failure KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+        FakeEmbeddingConfig.failQueryEmbedding();
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refused").value(true))
+                .andExpect(jsonPath("$.sources", hasSize(0)))
+                .andReturn();
+
+        String traceId = objectMapper.readTree(result.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        Long tracedRefusal = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM qa_traces
+                WHERE id = :traceId
+                  AND jsonb_array_length(retrieved_chunks) = 0
+                """)
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(tracedRefusal).isEqualTo(1);
     }
 
     @Test
@@ -345,6 +521,22 @@ class ChatControllerTest {
                 .andExpect(jsonPath("$.message").value("topK must be between 1 and 15."));
     }
 
+    @Test
+    void rejectsUnsupportedProfile() throws Exception {
+        String kbId = createKnowledgeBase("Validation KB");
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "annual leave",
+                                  "profile": "modular"
+                                }
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("profile must be auto or naive."));
+    }
+
     private String createKnowledgeBase(String name) throws Exception {
         MvcResult result = mockMvc.perform(post("/api/kbs")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -369,13 +561,16 @@ class ChatControllerTest {
                 .andReturn();
 
         JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
-        return body.path("document").path("id").asText();
+        String docId = body.path("document").path("id").asText();
+        waitForIngestReady(docId);
+        return docId;
     }
 
     private void publishDocument(String docId) throws Exception {
         mockMvc.perform(post("/api/documents/{docId}/publish", docId))
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.indexStatus").value("SYNCED"));
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
     }
 
     private String askQuestion(String kbId, String question) throws Exception {
@@ -407,6 +602,26 @@ class ChatControllerTest {
         fail("Timed out waiting for QA trace " + traceId);
     }
 
+    private void waitForIngestReady(String docId) throws InterruptedException {
+        for (int i = 0; i < 40; i++) {
+            String status = jdbcClient.sql("""
+                    SELECT status
+                    FROM ingest_tasks
+                    WHERE doc_id = :docId
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """)
+                    .param("docId", docId)
+                    .query(String.class)
+                    .single();
+            if ("READY".equals(status)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        fail("Timed out waiting for ingest task READY for " + docId);
+    }
+
     private static String extractTraceId(String sseBody) {
         Matcher matcher = Pattern.compile("\"qaTraceId\":\"([^\"]+)\"").matcher(sseBody);
         assertThat(matcher.find()).isTrue();
@@ -416,9 +631,80 @@ class ChatControllerTest {
     @TestConfiguration
     static class FakeEmbeddingConfig {
 
+        private static final AtomicReference<String> STREAMING_THREAD_NAME = new AtomicReference<>();
+        private static final AtomicBoolean FAIL_QUERY_EMBEDDING = new AtomicBoolean();
+        private static final AtomicBoolean FAIL_CHAT_GENERATION = new AtomicBoolean();
+        private static final java.util.concurrent.atomic.AtomicInteger QUERY_EMBEDDING_CALLS =
+                new java.util.concurrent.atomic.AtomicInteger();
+        private static final java.util.concurrent.atomic.AtomicInteger DOCUMENT_EMBEDDING_CALLS =
+                new java.util.concurrent.atomic.AtomicInteger();
+
         @Bean
         DocumentEmbeddingGateway documentEmbeddingGateway() {
-            return texts -> texts.stream()
+            return new DocumentEmbeddingGateway() {
+                @Override
+                public List<float[]> embed(List<String> texts) {
+                    return embedDocuments(texts);
+                }
+
+                @Override
+                public List<float[]> embedDocuments(List<String> texts) {
+                    DOCUMENT_EMBEDDING_CALLS.incrementAndGet();
+                    return embeddings(texts);
+                }
+
+                @Override
+                public List<float[]> embedQuery(String text) {
+                    QUERY_EMBEDDING_CALLS.incrementAndGet();
+                    if (FAIL_QUERY_EMBEDDING.getAndSet(false)) {
+                        throw new AiProviderException("AI embedding call failed.", new IllegalStateException("synthetic"));
+                    }
+                    return embeddings(List.of(text));
+                }
+            };
+        }
+
+        @Bean
+        StreamingAnswerGenerator streamingAnswerGenerator() {
+            return (question, sources, tokenConsumer) -> {
+                STREAMING_THREAD_NAME.set(Thread.currentThread().getName());
+                if (FAIL_CHAT_GENERATION.getAndSet(false)) {
+                    throw new AiProviderException("AI chat call failed.", new IllegalStateException("synthetic"));
+                }
+                tokenConsumer.accept("streamed answer");
+            };
+        }
+
+        static void reset() {
+            STREAMING_THREAD_NAME.set(null);
+            FAIL_QUERY_EMBEDDING.set(false);
+            FAIL_CHAT_GENERATION.set(false);
+            QUERY_EMBEDDING_CALLS.set(0);
+            DOCUMENT_EMBEDDING_CALLS.set(0);
+        }
+
+        static String streamingThreadName() {
+            return STREAMING_THREAD_NAME.get();
+        }
+
+        static void failQueryEmbedding() {
+            FAIL_QUERY_EMBEDDING.set(true);
+        }
+
+        static void failChatGeneration() {
+            FAIL_CHAT_GENERATION.set(true);
+        }
+
+        static int queryEmbeddingCalls() {
+            return QUERY_EMBEDDING_CALLS.get();
+        }
+
+        static int documentEmbeddingCalls() {
+            return DOCUMENT_EMBEDDING_CALLS.get();
+        }
+
+        private static List<float[]> embeddings(List<String> texts) {
+            return texts.stream()
                     .map(FakeEmbeddingConfig::embedding)
                     .toList();
         }

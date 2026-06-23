@@ -5,6 +5,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import com.knowsource.ai.AiProviderException;
 import com.knowsource.document.ResourceNotFoundException;
 import com.knowsource.user.DemoUserService;
 import org.springframework.beans.factory.ObjectProvider;
@@ -22,10 +23,12 @@ public class ChatService {
     private static final int MAX_SNIPPET_LENGTH = 240;
     private static final String EMPTY_CONTEXT_ANSWER =
             "\u77e5\u8bc6\u5e93\u4e2d\u672a\u627e\u5230\u76f8\u5173\u4fe1\u606f\u3002";
-    private static final String RAG_PROFILE = "naive";
+    private static final String AI_BUSY_ANSWER =
+            "\u5df2\u68c0\u7d22\u5230\u76f8\u5173\u77e5\u8bc6\uff0c\u4f46 AI \u670d\u52a1\u6682\u65f6\u7e41\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
 
     private final JdbcClient jdbcClient;
     private final DemoUserService demoUserService;
+    private final RagProfileRouter ragProfileRouter;
     private final VectorSearchService vectorSearchService;
     private final ObjectProvider<AnswerGenerator> answerGeneratorProvider;
     private final ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider;
@@ -35,13 +38,15 @@ public class ChatService {
     public ChatService(
             JdbcClient jdbcClient,
             DemoUserService demoUserService,
+            RagProfileRouter ragProfileRouter,
             VectorSearchService vectorSearchService,
             ObjectProvider<AnswerGenerator> answerGeneratorProvider,
             ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider,
-            @Qualifier("applicationTaskExecutor") ObjectProvider<AsyncTaskExecutor> taskExecutorProvider,
+            @Qualifier("chatExecutor") ObjectProvider<AsyncTaskExecutor> taskExecutorProvider,
             QaTraceService qaTraceService) {
         this.jdbcClient = jdbcClient;
         this.demoUserService = demoUserService;
+        this.ragProfileRouter = ragProfileRouter;
         this.vectorSearchService = vectorSearchService;
         this.answerGeneratorProvider = answerGeneratorProvider;
         this.streamingAnswerGeneratorProvider = streamingAnswerGeneratorProvider;
@@ -54,7 +59,8 @@ public class ChatService {
         if (context.refused()) {
             qaTraceService.recordAsync(traceRecord(context, context.fallbackAnswer(), 0, null));
             return new ChatResponse(
-                    context.traceId(), context.kbId(), context.question(), context.fallbackAnswer(), true,
+                    context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                    context.fallbackAnswer(), true,
                     context.sources());
         }
 
@@ -62,10 +68,12 @@ public class ChatService {
         long llmStartedAt = System.nanoTime();
         String answer = answerGenerator == null
                 ? context.fallbackAnswer()
-                : answerGenerator.generate(context.question(), context.sources());
+                : generateAnswer(answerGenerator, context);
         int llmMs = answerGenerator == null ? 0 : elapsedMillis(llmStartedAt);
         qaTraceService.recordAsync(traceRecord(context, answer, llmMs, null));
-        return new ChatResponse(context.traceId(), context.kbId(), context.question(), answer, false, context.sources());
+        return new ChatResponse(
+                context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                answer, false, context.sources());
     }
 
     public SseEmitter stream(String kbId, ChatRequest request) {
@@ -88,6 +96,7 @@ public class ChatService {
         long userId = demoUserService.currentUserId();
         requireKbMember(kbId, userId);
         String question = normalizeQuestion(request.question());
+        RagProfile ragProfile = ragProfileRouter.route(request);
 
         long retrievalStartedAt = System.nanoTime();
         List<RetrievedChunk> chunks = vectorSearchService.search(kbId, question, request.topK());
@@ -95,12 +104,14 @@ public class ChatService {
         String traceId = UUID.randomUUID().toString();
         if (chunks.isEmpty()) {
             return new ChatContext(
-                    traceId, userId, startedAt, kbId, question, true, List.of(), EMPTY_CONTEXT_ANSWER, retrievalMs);
+                    traceId, userId, startedAt, kbId, question, ragProfile, true, List.of(), EMPTY_CONTEXT_ANSWER,
+                    retrievalMs);
         }
 
         List<SourceCitation> sources = toSources(chunks);
         return new ChatContext(
-                traceId, userId, startedAt, kbId, question, false, sources, draftAnswer(sources), retrievalMs);
+                traceId, userId, startedAt, kbId, question, ragProfile, false, sources, draftAnswer(sources),
+                retrievalMs);
     }
 
     private void streamContext(ChatContext context, SseEmitter emitter) {
@@ -121,10 +132,14 @@ public class ChatService {
                 if (streamingAnswerGenerator == null) {
                     sendToken(emitter, answer, context.fallbackAnswer(), firstTokenAt);
                 } else {
-                    streamingAnswerGenerator.stream(
-                            context.question(),
-                            context.sources(),
-                            token -> sendToken(emitter, answer, token, firstTokenAt));
+                    try {
+                        streamingAnswerGenerator.stream(
+                                context.question(),
+                                context.sources(),
+                                token -> sendToken(emitter, answer, token, firstTokenAt));
+                    } catch (AiProviderException ex) {
+                        sendToken(emitter, answer, AI_BUSY_ANSWER, firstTokenAt);
+                    }
                 }
             }
 
@@ -134,13 +149,21 @@ public class ChatService {
             emitter.send(SseEmitter.event()
                     .name("done")
                     .data(new ChatStreamDone(
-                                    context.traceId(), context.kbId(), context.question(), context.refused(),
-                                    answer.toString()),
+                                    context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                                    context.refused(), answer.toString()),
                             MediaType.APPLICATION_JSON));
             emitter.complete();
         } catch (RuntimeException | java.io.IOException ex) {
             qaTraceService.recordAsync(traceRecord(context, answer.toString(), null, null));
             emitter.completeWithError(ex);
+        }
+    }
+
+    private static String generateAnswer(AnswerGenerator answerGenerator, ChatContext context) {
+        try {
+            return answerGenerator.generate(context.question(), context.sources());
+        } catch (AiProviderException ex) {
+            return AI_BUSY_ANSWER;
         }
     }
 
@@ -230,7 +253,7 @@ public class ChatService {
                 null,
                 generationFirstTokenMs,
                 elapsedMillis(context.startedAtNanos()),
-                RAG_PROFILE);
+                context.ragProfile().value());
     }
 
     private static int elapsedMillis(long startedAtNanos) {

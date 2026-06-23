@@ -1,4 +1,4 @@
 package com.knowsource.chat;
 
-public record ChatRequest(String question, Integer topK) {
+public record ChatRequest(String question, Integer topK, String profile) {
 }

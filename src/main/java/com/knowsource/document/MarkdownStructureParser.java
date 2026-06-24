@@ -44,7 +44,14 @@ class MarkdownStructureParser {
                     tableLines.add(lines.get(index));
                     index++;
                 }
-                blocks.add(new ExtractedBlock(withHeadingContext(String.join("\n", tableLines), headings), null, "TABLE"));
+                List<String> sectionPath = activeHeadings(headings);
+                blocks.add(new ExtractedBlock(
+                        withHeadingContext(String.join("\n", tableLines), sectionPath),
+                        null,
+                        "TABLE",
+                        blocks.size(),
+                        sectionPath,
+                        sectionPath.isEmpty() ? null : sectionPath.getLast()));
                 continue;
             }
 
@@ -63,18 +70,28 @@ class MarkdownStructureParser {
         String content = String.join("\n", paragraph).trim();
         paragraph.clear();
         if (StringUtils.hasText(content)) {
-            blocks.add(new ExtractedBlock(withHeadingContext(content, headings), null, "TEXT"));
+            List<String> sectionPath = activeHeadings(headings);
+            blocks.add(new ExtractedBlock(
+                    withHeadingContext(content, sectionPath),
+                    null,
+                    "TEXT",
+                    blocks.size(),
+                    sectionPath,
+                    null));
         }
     }
 
-    private String withHeadingContext(String content, String[] headings) {
-        List<String> activeHeadings = Arrays.stream(headings)
-                .filter(StringUtils::hasText)
-                .toList();
-        if (activeHeadings.isEmpty()) {
+    private String withHeadingContext(String content, List<String> sectionPath) {
+        if (sectionPath.isEmpty()) {
             return content.trim();
         }
-        return String.join(" > ", activeHeadings) + "\n\n" + content.trim();
+        return String.join(" > ", sectionPath) + "\n\n" + content.trim();
+    }
+
+    private List<String> activeHeadings(String[] headings) {
+        return Arrays.stream(headings)
+                .filter(StringUtils::hasText)
+                .toList();
     }
 
     private Heading parseHeading(String line) {

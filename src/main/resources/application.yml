@@ -146,4 +146,4 @@ knowsource:
       max-attempts: ${KNOWSOURCE_INDEX_RETRY_MAX_ATTEMPTS:5}
       initial-delay-seconds: ${KNOWSOURCE_INDEX_RETRY_INITIAL_DELAY_SECONDS:30}
       max-delay-seconds: ${KNOWSOURCE_INDEX_RETRY_MAX_DELAY_SECONDS:300}
-    syncing-timeout-seconds: ${KNOWSOURCE_INDEX_SYNCING_TIMEOUT_SECONDS:300}
+    syncing-timeout-seconds: ${KNOWSOURCE_INDEX_SYNCING_TIMEOUT_SECONDS:1800}

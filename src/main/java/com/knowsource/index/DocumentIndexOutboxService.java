@@ -25,7 +25,7 @@ public class DocumentIndexOutboxService {
             JdbcClient jdbcClient,
             VectorIndexService vectorIndexService,
             TransactionTemplate transactionTemplate,
-            @Value("${knowsource.index.syncing-timeout-seconds:300}") long syncingTimeoutSeconds,
+            @Value("${knowsource.index.syncing-timeout-seconds:1800}") long syncingTimeoutSeconds,
             @Value("${knowsource.index.retry.max-attempts:5}") int maxAttempts,
             @Value("${knowsource.index.retry.initial-delay-seconds:30}") long initialRetryDelaySeconds,
             @Value("${knowsource.index.retry.max-delay-seconds:300}") long maxRetryDelaySeconds) {
@@ -175,7 +175,7 @@ public class DocumentIndexOutboxService {
         transactionTemplate.executeWithoutResult(status -> {
             jdbcClient.sql("""
                     UPDATE document_publish_events
-                    SET status = 'DONE',
+                    SET status = 'PROCESSED',
                         processed_at = NOW(),
                         locked_at = NULL,
                         locked_by = NULL,

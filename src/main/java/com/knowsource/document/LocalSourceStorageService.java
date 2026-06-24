@@ -54,6 +54,14 @@ public class LocalSourceStorageService implements SourceStorageService {
     }
 
     @Override
+    public String previewUrl(String sourceKey, int ttlSeconds) {
+        String relativePath = sourceKey.startsWith("local://") ? sourceKey.substring("local://".length()) : sourceKey;
+        Path source = rootPath.resolve(relativePath).normalize();
+        ensureWithinRoot(source);
+        return "/api/documents/source-preview?sourceKey=" + urlEncode(sourceKey);
+    }
+
+    @Override
     public void delete(String sourceKey) throws IOException {
         String relativePath = sourceKey.startsWith("local://") ? sourceKey.substring("local://".length()) : sourceKey;
         Path source = rootPath.resolve(relativePath).normalize();
@@ -85,5 +93,9 @@ public class LocalSourceStorageService implements SourceStorageService {
             return "source.txt";
         }
         return sanitized;
+    }
+
+    private String urlEncode(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 }

@@ -15,6 +15,10 @@ public interface SourceStorageService {
 
     InputStream open(String sourceKey) throws IOException;
 
+    default String previewUrl(String sourceKey, int ttlSeconds) {
+        return null;
+    }
+
     default void delete(String sourceKey) throws IOException {
     }
 }

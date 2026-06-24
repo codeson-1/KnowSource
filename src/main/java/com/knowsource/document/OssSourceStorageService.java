@@ -9,6 +9,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -92,6 +93,19 @@ public class OssSourceStorageService implements SourceStorageService {
                 .DELETE()
                 .build();
         send(request);
+    }
+
+    @Override
+    public String previewUrl(String sourceKey, int ttlSeconds) {
+        String objectKey = objectKeyFromSourceKey(sourceKey);
+        long expires = Instant.now().plusSeconds(Math.max(60, ttlSeconds)).getEpochSecond();
+        String canonicalResource = "/" + bucket + "/" + objectKey;
+        String stringToSign = "GET\n\n\n" + expires + "\n" + canonicalResource;
+        String signature = urlEncode(hmacSha1Base64(stringToSign, accessKeySecret));
+        return objectUri(objectKey)
+                + "?OSSAccessKeyId=" + urlEncode(accessKeyId)
+                + "&Expires=" + expires
+                + "&Signature=" + signature;
     }
 
     private HttpRequest.Builder signedRequest(String method, String objectKey, String contentType) {
@@ -203,5 +217,9 @@ public class OssSourceStorageService implements SourceStorageService {
             throw new IllegalArgumentException(propertyName + " is required when OSS storage is enabled.");
         }
         return value.trim();
+    }
+
+    private String urlEncode(String value) {
+        return java.net.URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 }

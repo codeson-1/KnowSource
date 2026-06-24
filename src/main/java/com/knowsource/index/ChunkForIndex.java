@@ -8,5 +8,6 @@ public record ChunkForIndex(
         String content,
         int chunkIndex,
         Integer pageNumber,
-        String chunkType) {
+        String chunkType,
+        String metadata) {
 }

@@ -180,6 +180,20 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(greaterThan(0))))
                 .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("durable local storage")));
+
+        mockMvc.perform(get("/api/documents/{docId}/preview", docId)
+                        .param("pageNumber", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.docId").value(docId))
+                .andExpect(jsonPath("$.sourceKey").value(sourceKey))
+                .andExpect(jsonPath("$.previewUrl").value(org.hamcrest.Matchers.startsWith("/api/documents/source-preview?sourceKey=")))
+                .andExpect(jsonPath("$.pageNumber").value(1));
+
+        mockMvc.perform(get("/api/documents/source-preview")
+                        .param("sourceKey", sourceKey))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
+                        .string(org.hamcrest.Matchers.containsString("durable local storage")));
     }
 
     @Test
@@ -218,7 +232,13 @@ class DocumentControllerTest {
         Long tableChunks = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM chunk_children
-                WHERE doc_id = :docId AND chunk_type = 'TABLE' AND content LIKE '%Benefits > Leave%'
+                WHERE doc_id = :docId
+                  AND chunk_type = 'TABLE'
+                  AND content LIKE '%Benefits > Leave%'
+                  AND jsonb_path_exists(metadata, '$.sectionPath[*] ? (@ == "Benefits")')
+                  AND jsonb_path_exists(metadata, '$.sectionPath[*] ? (@ == "Leave")')
+                  AND metadata ->> 'tableCaption' = 'Leave'
+                  AND (metadata ->> 'blockIndex')::int >= 0
                 """)
                 .param("docId", docId)
                 .query(Long.class)
@@ -228,6 +248,41 @@ class DocumentControllerTest {
         mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("Benefits > Leave")));
+    }
+
+    @Test
+    void chunkerKeepsParagraphBoundariesAndPersistsOffsets() throws Exception {
+        String kbId = createKnowledgeBase("Chunk Boundary KB");
+        String firstSentence = "Approval policy sentence one contains enough explanatory detail to be useful in a retrieval chunk. ";
+        String secondSentence = "Approval policy sentence two contains more explanatory detail and should stay whole. ";
+        String firstParagraph = firstSentence.repeat(12) + secondSentence.repeat(8);
+        String secondParagraph = "Expense policy sentence one. Expense policy sentence two.";
+
+        String docId = createDocument(kbId, "Boundary Policy", firstParagraph + "\\n\\n" + secondParagraph);
+
+        Long midSentenceChunks = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_children
+                WHERE doc_id = :docId
+                  AND content NOT LIKE 'Approval policy sentence%'
+                  AND content NOT LIKE 'Expense policy sentence%'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long offsetChunks = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_children
+                WHERE doc_id = :docId
+                  AND (metadata ->> 'startOffset')::int >= 0
+                  AND (metadata ->> 'endOffset')::int > (metadata ->> 'startOffset')::int
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        org.assertj.core.api.Assertions.assertThat(midSentenceChunks).isZero();
+        org.assertj.core.api.Assertions.assertThat(offsetChunks).isPositive();
     }
 
     @Test

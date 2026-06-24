@@ -95,8 +95,23 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
             if (!StringUtils.hasText(block)) {
                 continue;
             }
-            blocks.add(new ExtractedBlock(block, pageNumber, looksLikeTable(block) ? "TABLE" : "TEXT"));
+            String chunkType = looksLikeTable(block) ? "TABLE" : "TEXT";
+            blocks.add(new ExtractedBlock(
+                    block,
+                    pageNumber,
+                    chunkType,
+                    blocks.size(),
+                    List.of(),
+                    "TABLE".equals(chunkType) ? firstNonBlankLine(block) : null));
         }
+    }
+
+    private String firstNonBlankLine(String block) {
+        return block.lines()
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .findFirst()
+                .orElse(null);
     }
 
     private boolean looksLikeTable(String block) {

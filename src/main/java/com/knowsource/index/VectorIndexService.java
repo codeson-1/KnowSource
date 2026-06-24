@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
 @Service
 public class VectorIndexService {
@@ -101,7 +102,8 @@ public class VectorIndexService {
 
     private List<ChunkForIndex> loadChunks(String docId, int docVersion) {
         return jdbcClient.sql("""
-                SELECT id, doc_id, doc_version, parent_chunk_id, content, chunk_index, page_number, chunk_type
+                SELECT id, doc_id, doc_version, parent_chunk_id, content, chunk_index, page_number, chunk_type,
+                       metadata::text AS metadata
                 FROM chunk_children
                 WHERE doc_id = :docId AND doc_version = :docVersion
                 ORDER BY chunk_index ASC
@@ -121,7 +123,8 @@ public class VectorIndexService {
                 rs.getString("content"),
                 rs.getInt("chunk_index"),
                 (Integer) rs.getObject("page_number"),
-                rs.getString("chunk_type"));
+                rs.getString("chunk_type"),
+                rs.getString("metadata"));
     }
 
     private static String vectorLiteral(float[] embedding) {
@@ -137,8 +140,9 @@ public class VectorIndexService {
 
     private static String metadataJson(String kbId, ChunkForIndex chunk) {
         String pageNumber = chunk.pageNumber() == null ? "null" : chunk.pageNumber().toString();
+        String ingestMetadata = StringUtils.hasText(chunk.metadata()) ? chunk.metadata() : "{}";
         return """
-                {"kbId":"%s","docId":"%s","docVersion":%d,"status":"published","chunkId":"%s","parentChunkId":"%s","chunkIndex":%d,"pageNumber":%s,"chunkType":"%s"}
+                {"kbId":"%s","docId":"%s","docVersion":%d,"status":"published","chunkId":"%s","parentChunkId":"%s","chunkIndex":%d,"pageNumber":%s,"chunkType":"%s","ingestMetadata":%s}
                 """.formatted(
                         jsonEscape(kbId),
                         jsonEscape(chunk.docId()),
@@ -147,7 +151,8 @@ public class VectorIndexService {
                         jsonEscape(chunk.parentChunkId()),
                         chunk.chunkIndex(),
                         pageNumber,
-                        jsonEscape(chunk.chunkType()))
+                        jsonEscape(chunk.chunkType()),
+                        ingestMetadata)
                 .trim();
     }
 

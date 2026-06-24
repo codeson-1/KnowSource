@@ -5,6 +5,6 @@ import java.util.List;
 public record ExtractedDocument(List<ExtractedBlock> blocks) {
 
     public static ExtractedDocument text(String content) {
-        return new ExtractedDocument(List.of(new ExtractedBlock(content, null, "TEXT")));
+        return new ExtractedDocument(List.of(new ExtractedBlock(content, null, "TEXT", 0, List.of(), null)));
     }
 }

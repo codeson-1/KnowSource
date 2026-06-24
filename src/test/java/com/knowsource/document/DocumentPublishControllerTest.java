@@ -3,6 +3,7 @@ package com.knowsource.document;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -159,10 +160,10 @@ class DocumentPublishControllerTest {
                 .param("docId", docId)
                 .query(Long.class)
                 .single();
-        Long doneEvents = jdbcClient.sql("""
+        Long processedEvents = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM document_publish_events
-                WHERE doc_id = :docId AND doc_version = 1 AND event_type = 'PUBLISH' AND status = 'DONE'
+                WHERE doc_id = :docId AND doc_version = 1 AND event_type = 'PUBLISH' AND status = 'PROCESSED'
                 """)
                 .param("docId", docId)
                 .query(Long.class)
@@ -183,8 +184,98 @@ class DocumentPublishControllerTest {
 
         assertThat(indexStatus).isEqualTo("SYNCED");
         assertThat(syncedAtCount).isEqualTo(1);
-        assertThat(doneEvents).isEqualTo(1);
+        assertThat(processedEvents).isEqualTo(1);
         assertThat(vectorRows).isEqualTo(childChunks);
+    }
+
+    @Test
+    void archivesPublishedDocumentAndRemovesVectors() throws Exception {
+        String kbId = createKnowledgeBase("Archive KB");
+        String docId = createDocument(kbId, "Archive Policy", "Archive policy should be indexed then removed.");
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted());
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long indexedRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        assertThat(indexedRows).isPositive();
+
+        mockMvc.perform(post("/api/documents/{docId}/archive", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.docId").value(docId))
+                .andExpect(jsonPath("$.indexStatus").value("NONE"))
+                .andExpect(jsonPath("$.message").value("Document archived; vectors were removed."));
+
+        String documentStatus = jdbcClient.sql("SELECT status FROM documents WHERE id = :docId")
+                .param("docId", docId)
+                .query(String.class)
+                .single();
+        Long vectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(documentStatus).isEqualTo("ARCHIVED");
+        assertThat(vectorRows).isZero();
+    }
+
+    @Test
+    void replacingDocumentIncrementsVersionAndNewPublishIndexesOnlyCurrentVersion() throws Exception {
+        String kbId = createKnowledgeBase("Replace KB");
+        String docId = createDocument(kbId, "Old Policy", "Old annual leave rules.");
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted());
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        mockMvc.perform(put("/api/documents/{docId}", docId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "title": "New Policy",
+                                  "content": "New annual leave rules with updated approval."
+                                }
+                                """))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.document.id").value(docId))
+                .andExpect(jsonPath("$.document.version").value(2))
+                .andExpect(jsonPath("$.document.status").value("DRAFT"))
+                .andExpect(jsonPath("$.document.indexStatus").value("NONE"));
+        waitForIngestReady(docId);
+
+        Long oldVectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        assertThat(oldVectorRows).isZero();
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.version").value(2));
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long currentVersionVectors = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM vector_store
+                WHERE doc_id = :docId AND doc_version = 2
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long previousVersionVectors = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM vector_store
+                WHERE doc_id = :docId AND doc_version = 1
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(currentVersionVectors).isPositive();
+        assertThat(previousVersionVectors).isZero();
     }
 
     @Test
@@ -210,6 +301,8 @@ class DocumentPublishControllerTest {
                 WHERE doc_id = :docId
                   AND metadata ->> 'chunkType' = 'TABLE'
                   AND (metadata ->> 'pageNumber')::int = 3
+                  AND metadata -> 'ingestMetadata' ->> 'blockIndex' IS NOT NULL
+                  AND metadata -> 'ingestMetadata' ->> 'startOffset' IS NOT NULL
                 """)
                 .param("docId", docId)
                 .query(Long.class)
@@ -336,10 +429,10 @@ class DocumentPublishControllerTest {
 
         assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
 
-        Long doneEvents = jdbcClient.sql("""
+        Long processedEvents = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM document_publish_events
-                WHERE id = :eventId AND status = 'DONE' AND error_message IS NULL
+                WHERE id = :eventId AND status = 'PROCESSED' AND error_message IS NULL
                 """)
                 .param("eventId", eventId)
                 .query(Long.class)
@@ -349,7 +442,7 @@ class DocumentPublishControllerTest {
                 .query(Long.class)
                 .single();
 
-        assertThat(doneEvents).isEqualTo(1);
+        assertThat(processedEvents).isEqualTo(1);
         assertThat(vectorRows).isPositive();
     }
 
@@ -415,7 +508,7 @@ class DocumentPublishControllerTest {
                     (id, doc_id, kb_id, doc_version, event_type, status, attempt_count, locked_at, locked_by, created_at, updated_at)
                 VALUES
                     ('stale-event', :docId, :kbId, 1, 'PUBLISH', 'SYNCING', 0,
-                     NOW() - INTERVAL '10 minutes', 'dead-worker', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '10 minutes')
+                     NOW() - INTERVAL '31 minutes', 'dead-worker', NOW() - INTERVAL '31 minutes', NOW() - INTERVAL '31 minutes')
                 """)
                 .param("docId", docId)
                 .param("kbId", kbId)
@@ -431,7 +524,7 @@ class DocumentPublishControllerTest {
                 SELECT COUNT(*)
                 FROM document_publish_events
                 WHERE id = 'stale-event'
-                  AND status = 'DONE'
+                  AND status = 'PROCESSED'
                   AND attempt_count = 1
                   AND processed_at IS NOT NULL
                 """)

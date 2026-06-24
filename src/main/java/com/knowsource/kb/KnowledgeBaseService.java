@@ -5,7 +5,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.UUID;
 
-import com.knowsource.user.DemoUserService;
+import com.knowsource.security.CurrentUserService;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,18 +17,18 @@ public class KnowledgeBaseService {
     private static final int MAX_NAME_LENGTH = 128;
 
     private final JdbcClient jdbcClient;
-    private final DemoUserService demoUserService;
+    private final CurrentUserService currentUserService;
 
-    public KnowledgeBaseService(JdbcClient jdbcClient, DemoUserService demoUserService) {
+    public KnowledgeBaseService(JdbcClient jdbcClient, CurrentUserService currentUserService) {
         this.jdbcClient = jdbcClient;
-        this.demoUserService = demoUserService;
+        this.currentUserService = currentUserService;
     }
 
     @Transactional
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
         String name = normalizeName(request.name());
         String description = normalizeDescription(request.description());
-        long ownerId = demoUserService.currentUserId();
+        long ownerId = currentUserService.currentUserId();
         String kbId = UUID.randomUUID().toString();
 
         KnowledgeBaseResponse response = jdbcClient.sql("""
@@ -55,7 +55,7 @@ public class KnowledgeBaseService {
     }
 
     public List<KnowledgeBaseResponse> listMine() {
-        long userId = demoUserService.currentUserId();
+        long userId = currentUserService.currentUserId();
 
         return jdbcClient.sql("""
                 SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at

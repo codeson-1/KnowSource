@@ -5,5 +5,5 @@ import java.io.InputStream;
 
 public interface DocumentTextExtractor {
 
-    String extract(String sourceKey, String fileType) throws IOException;
+    ExtractedDocument extract(String sourceKey, String fileType) throws IOException;
 }

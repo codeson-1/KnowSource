@@ -25,6 +25,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.util.FileSystemUtils;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -37,6 +38,7 @@ import com.knowsource.user.DemoUserInitializer;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
+@WithMockUser(username = "demo", roles = "ADMIN")
 class DocumentControllerTest {
 
     @Autowired
@@ -55,6 +57,8 @@ class DocumentControllerTest {
     void cleanBusinessData() {
         FileSystemUtils.deleteRecursively(Path.of("target/test-sources").toFile());
         jdbcClient.sql("DELETE FROM qa_traces").update();
+        jdbcClient.sql("DELETE FROM chat_messages").update();
+        jdbcClient.sql("DELETE FROM chat_sessions").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();
         jdbcClient.sql("DELETE FROM chunk_parents").update();
@@ -179,6 +183,54 @@ class DocumentControllerTest {
     }
 
     @Test
+    void uploadsMarkdownAndPreservesTableChunkMetadata() throws Exception {
+        String kbId = createKnowledgeBase("Markdown KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "handbook.md",
+                "text/markdown",
+                """
+                        # Benefits
+
+                        ## Leave
+
+                        | Type | Days |
+                        | --- | --- |
+                        | Annual | 10 |
+                        | Sick | 5 |
+
+                        Approval requests must be submitted before leave starts.
+                        """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Benefits Handbook"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.document.fileType").value("MARKDOWN"))
+                .andReturn();
+
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestReady(docId);
+
+        Long tableChunks = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_children
+                WHERE doc_id = :docId AND chunk_type = 'TABLE' AND content LIKE '%Benefits > Leave%'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        org.assertj.core.api.Assertions.assertThat(tableChunks).isPositive();
+
+        mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("Benefits > Leave")));
+    }
+
+    @Test
     void uploadsPdfDocumentAndIngestsWithTika() throws Exception {
         String kbId = createKnowledgeBase("PDF KB");
         MockMultipartFile file = new MockMultipartFile(
@@ -206,6 +258,42 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(greaterThan(0))))
                 .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("manager approval")));
+    }
+
+    @Test
+    void uploadsPdfAndPersistsPageNumbers() throws Exception {
+        String kbId = createKnowledgeBase("PDF Pages KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "pages.pdf",
+                "application/pdf",
+                pdfBytes("First page onboarding policy.", "Second page reimbursement table."));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Paged PDF"))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestReady(docId);
+
+        Long pageTwoChunks = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chunk_children
+                WHERE doc_id = :docId AND page_number = 2 AND content LIKE '%Second page%'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        org.assertj.core.api.Assertions.assertThat(pageTwoChunks).isPositive();
+
+        mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].pageNumber").value(1));
     }
 
     @Test
@@ -240,6 +328,54 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.ingestStatus").value("FAILED"))
                 .andExpect(jsonPath("$.childChunkCount").value(0));
+    }
+
+    @Test
+    void retriesFailedMultipartIngestFromStoredSource() throws Exception {
+        String kbId = createKnowledgeBase("Retry Upload KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "retry.pdf",
+                "application/pdf",
+                "%PDF-1.4\n%%EOF".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Retryable PDF"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.document.fileType").value("PDF"))
+                .andReturn();
+
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String docId = body.path("document").path("id").asText();
+        String sourceKey = body.path("document").path("ossKey").asText();
+        waitForIngestStatus(docId, "FAILED");
+
+        Path storedSource = Path.of("target/test-sources").resolve(sourceKey.substring("local://".length()));
+        Files.write(storedSource, pdfBytes("Retry after parser failure should rebuild chunks."));
+
+        mockMvc.perform(post("/api/documents/{docId}/ingest-task/retry", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.document.id").value(docId))
+                .andExpect(jsonPath("$.ingestStatus").value("PENDING"))
+                .andExpect(jsonPath("$.childChunkCount").value(0));
+
+        waitForIngestReady(docId);
+
+        mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(greaterThan(0))))
+                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("rebuild chunks")));
+    }
+
+    @Test
+    void rejectsRetryForReadyIngestTask() throws Exception {
+        String kbId = createKnowledgeBase("Ready Retry KB");
+        String docId = createDocument(kbId, "FAQ", "Retry should be rejected for ready content.");
+
+        mockMvc.perform(post("/api/documents/{docId}/ingest-task/retry", docId))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Only FAILED ingest tasks can be retried."));
     }
 
     @Test
@@ -346,15 +482,21 @@ class DocumentControllerTest {
     }
 
     private byte[] pdfBytes(String text) throws Exception {
+        return pdfBytes(new String[] { text });
+    }
+
+    private byte[] pdfBytes(String... pages) throws Exception {
         try (PDDocument document = new PDDocument()) {
-            PDPage page = new PDPage();
-            document.addPage(page);
-            try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
-                contentStream.beginText();
-                contentStream.setFont(PDType1Font.HELVETICA, 12);
-                contentStream.newLineAtOffset(72, 720);
-                contentStream.showText(text);
-                contentStream.endText();
+            for (String pageText : pages) {
+                PDPage page = new PDPage();
+                document.addPage(page);
+                try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
+                    contentStream.beginText();
+                    contentStream.setFont(PDType1Font.HELVETICA, 12);
+                    contentStream.newLineAtOffset(72, 720);
+                    contentStream.showText(pageText);
+                    contentStream.endText();
+                }
             }
             try (var output = new java.io.ByteArrayOutputStream()) {
                 document.save(output);

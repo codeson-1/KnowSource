@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 public record QaTraceDetailResponse(
         String id,
+        String sessionId,
         String kbId,
         long userId,
         String query,

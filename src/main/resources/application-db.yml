@@ -1,5 +1,6 @@
 knowsource:
   storage:
+    type: local
     local:
       root: ./target/test-sources
   ingest:

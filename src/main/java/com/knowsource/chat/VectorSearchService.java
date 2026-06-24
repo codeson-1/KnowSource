@@ -2,7 +2,11 @@ package com.knowsource.chat;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import com.knowsource.ai.AiProviderException;
 import com.knowsource.index.DocumentEmbeddingGateway;
@@ -38,13 +42,46 @@ class VectorSearchService {
     }
 
     List<RetrievedChunk> search(String kbId, String question, Integer requestedTopK) {
+        String normalizedQuestion = normalizeQuestion(question);
+        int topK = normalizeTopK(requestedTopK);
+        List<RetrievedChunk> candidates = searchCandidates(kbId, normalizedQuestion, Math.max(topK, candidateTopK));
+        return documentReranker.rerank(normalizedQuestion, candidates, topK);
+    }
+
+    List<RetrievedChunk> search(String kbId, List<String> queries, Integer requestedTopK) {
+        List<String> normalizedQueries = queries.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
+        if (normalizedQueries.isEmpty()) {
+            throw new IllegalArgumentException("Question is required.");
+        }
+        if (normalizedQueries.size() == 1) {
+            return search(kbId, normalizedQueries.getFirst(), requestedTopK);
+        }
+
+        int topK = normalizeTopK(requestedTopK);
+        int candidateLimit = Math.max(topK, candidateTopK);
+        Map<String, RetrievedChunk> merged = new LinkedHashMap<>();
+        for (String query : normalizedQueries) {
+            for (RetrievedChunk chunk : searchCandidates(kbId, query, candidateLimit)) {
+                merged.merge(chunkKey(chunk), chunk, VectorSearchService::higherScore);
+            }
+        }
+
+        List<RetrievedChunk> candidates = new ArrayList<>(merged.values());
+        candidates.sort(Comparator.comparingDouble(RetrievedChunk::distance));
+        return documentReranker.rerank(normalizedQueries.getFirst(), candidates, topK);
+    }
+
+    private List<RetrievedChunk> searchCandidates(String kbId, String question, int candidateLimit) {
         DocumentEmbeddingGateway embeddingGateway = embeddingGatewayProvider.getIfAvailable();
         if (embeddingGateway == null) {
             throw new IllegalStateException("Document embedding gateway is not available.");
         }
 
         String normalizedQuestion = normalizeQuestion(question);
-        int topK = normalizeTopK(requestedTopK);
         List<float[]> embeddings;
         try {
             embeddings = embeddingGateway.embedQuery(normalizedQuestion);
@@ -87,10 +124,18 @@ class VectorSearchService {
                 .param("kbId", kbId)
                 .param("queryEmbedding", vectorLiteral(embeddings.getFirst()))
                 .param("maxDistance", maxDistance)
-                .param("topK", Math.max(topK, candidateTopK))
+                .param("topK", candidateLimit)
                 .query(VectorSearchService::mapChunk)
                 .list();
-        return documentReranker.rerank(normalizedQuestion, candidates, topK);
+        return candidates;
+    }
+
+    private static String chunkKey(RetrievedChunk chunk) {
+        return chunk.docId() + ":" + chunk.docVersion() + ":" + chunk.chunkId();
+    }
+
+    private static RetrievedChunk higherScore(RetrievedChunk left, RetrievedChunk right) {
+        return left.score() >= right.score() ? left : right;
     }
 
     private static RetrievedChunk mapChunk(ResultSet rs, int rowNum) throws SQLException {

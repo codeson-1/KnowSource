@@ -25,6 +25,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -32,6 +33,7 @@ import org.springframework.test.web.servlet.MvcResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
+@WithMockUser(username = "demo", roles = "ADMIN")
 class ChatAnswerFallbackTest {
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -52,6 +54,8 @@ class ChatAnswerFallbackTest {
     @BeforeEach
     void cleanBusinessData() {
         jdbcClient.sql("DELETE FROM qa_traces").update();
+        jdbcClient.sql("DELETE FROM chat_messages").update();
+        jdbcClient.sql("DELETE FROM chat_sessions").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM vector_store").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();

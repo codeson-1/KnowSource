@@ -136,16 +136,18 @@ public class VectorIndexService {
     }
 
     private static String metadataJson(String kbId, ChunkForIndex chunk) {
+        String pageNumber = chunk.pageNumber() == null ? "null" : chunk.pageNumber().toString();
         return """
-                {"kbId":"%s","docId":"%s","docVersion":%d,"status":"published","chunkId":"%s","parentChunkId":"%s","chunkIndex":%d,"chunkType":"%s"}
+                {"kbId":"%s","docId":"%s","docVersion":%d,"status":"published","chunkId":"%s","parentChunkId":"%s","chunkIndex":%d,"pageNumber":%s,"chunkType":"%s"}
                 """.formatted(
-                jsonEscape(kbId),
-                jsonEscape(chunk.docId()),
-                chunk.docVersion(),
-                jsonEscape(chunk.id()),
-                jsonEscape(chunk.parentChunkId()),
-                chunk.chunkIndex(),
-                jsonEscape(chunk.chunkType()))
+                        jsonEscape(kbId),
+                        jsonEscape(chunk.docId()),
+                        chunk.docVersion(),
+                        jsonEscape(chunk.id()),
+                        jsonEscape(chunk.parentChunkId()),
+                        chunk.chunkIndex(),
+                        pageNumber,
+                        jsonEscape(chunk.chunkType()))
                 .trim();
     }
 

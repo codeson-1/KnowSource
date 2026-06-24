@@ -25,6 +25,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -32,6 +33,7 @@ import org.springframework.test.web.servlet.MvcResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
+@WithMockUser(username = "demo", roles = "ADMIN")
 class DocumentPublishControllerTest {
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -53,6 +55,8 @@ class DocumentPublishControllerTest {
     void cleanBusinessData() {
         FakeEmbeddingConfig.reset();
         jdbcClient.sql("DELETE FROM qa_traces").update();
+        jdbcClient.sql("DELETE FROM chat_messages").update();
+        jdbcClient.sql("DELETE FROM chat_sessions").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM vector_store").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();
@@ -184,6 +188,37 @@ class DocumentPublishControllerTest {
     }
 
     @Test
+    void outboxConsumerWritesChunkMetadataIntoVectorRows() throws Exception {
+        String kbId = createKnowledgeBase("Metadata KB");
+        String docId = createDocument(kbId, "Policy Table", "Leave table Type Days Annual 10");
+        jdbcClient.sql("""
+                UPDATE chunk_children
+                SET page_number = 3, chunk_type = 'TABLE'
+                WHERE doc_id = :docId AND chunk_index = 0
+                """)
+                .param("docId", docId)
+                .update();
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted());
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long metadataRows = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM vector_store
+                WHERE doc_id = :docId
+                  AND metadata ->> 'chunkType' = 'TABLE'
+                  AND (metadata ->> 'pageNumber')::int = 3
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(metadataRows).isEqualTo(1);
+    }
+
+    @Test
     void outboxConsumerEmbedsDocumentChunksInConfiguredBatches() throws Exception {
         String kbId = createKnowledgeBase("Batch KB");
         String docId = createDocument(kbId, "Long Policy", "A".repeat(1_800));
@@ -263,6 +298,76 @@ class DocumentPublishControllerTest {
 
         assertThat(secondFailure).isEqualTo(1);
         assertThat(indexStatus).isEqualTo("FAILED");
+    }
+
+    @Test
+    void requeuesFailedIndexEventAndAllowsProcessingAgain() throws Exception {
+        String kbId = createKnowledgeBase("Manual Requeue KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+        FakeEmbeddingConfig.failNextEmbeddingRequests(1);
+
+        MvcResult publishResult = mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
+                .andReturn();
+        String eventId = objectMapper.readTree(publishResult.getResponse().getContentAsString())
+                .path("eventId")
+                .asText();
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        mockMvc.perform(post("/api/documents/{docId}/index-events/{eventId}/requeue", docId, eventId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.docId").value(docId))
+                .andExpect(jsonPath("$.eventId").value(eventId))
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
+                .andExpect(jsonPath("$.message").value("Index event requeued; indexing is pending."));
+
+        String eventStatus = jdbcClient.sql("SELECT status FROM document_publish_events WHERE id = :eventId")
+                .param("eventId", eventId)
+                .query(String.class)
+                .single();
+        String documentIndexStatus = jdbcClient.sql("SELECT index_status FROM documents WHERE id = :docId")
+                .param("docId", docId)
+                .query(String.class)
+                .single();
+        assertThat(eventStatus).isEqualTo("PENDING");
+        assertThat(documentIndexStatus).isEqualTo("PENDING");
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long doneEvents = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE id = :eventId AND status = 'DONE' AND error_message IS NULL
+                """)
+                .param("eventId", eventId)
+                .query(Long.class)
+                .single();
+        Long vectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(doneEvents).isEqualTo(1);
+        assertThat(vectorRows).isPositive();
+    }
+
+    @Test
+    void rejectsRequeueForPendingIndexEvent() throws Exception {
+        String kbId = createKnowledgeBase("Pending Requeue KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+
+        MvcResult publishResult = mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andReturn();
+        String eventId = objectMapper.readTree(publishResult.getResponse().getContentAsString())
+                .path("eventId")
+                .asText();
+
+        mockMvc.perform(post("/api/documents/{docId}/index-events/{eventId}/requeue", docId, eventId))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Only FAILED index events can be requeued."));
     }
 
     @Test

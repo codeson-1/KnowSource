@@ -48,9 +48,22 @@ server:
   port: ${SERVER_PORT:8080}
 
 knowsource:
+  security:
+    jwt:
+      secret: ${KNOWSOURCE_JWT_SECRET:dev-only-change-me-dev-only-change-me}
+      access-token-ttl-seconds: ${KNOWSOURCE_JWT_ACCESS_TOKEN_TTL_SECONDS:900}
+    refresh-token-ttl-days: ${KNOWSOURCE_REFRESH_TOKEN_TTL_DAYS:7}
   storage:
+    type: ${KNOWSOURCE_STORAGE_TYPE:local}
     local:
       root: ${KNOWSOURCE_STORAGE_LOCAL_ROOT:./data/sources}
+    oss:
+      endpoint: ${KNOWSOURCE_STORAGE_OSS_ENDPOINT:}
+      bucket: ${KNOWSOURCE_STORAGE_OSS_BUCKET:}
+      access-key-id: ${KNOWSOURCE_STORAGE_OSS_ACCESS_KEY_ID:}
+      access-key-secret: ${KNOWSOURCE_STORAGE_OSS_ACCESS_KEY_SECRET:}
+      key-prefix: ${KNOWSOURCE_STORAGE_OSS_KEY_PREFIX:knowsource/sources}
+      timeout-seconds: ${KNOWSOURCE_STORAGE_OSS_TIMEOUT_SECONDS:30}
   ingest:
     max-file-size-bytes: ${KNOWSOURCE_INGEST_MAX_FILE_SIZE_BYTES:52428800}
   async:
@@ -75,6 +88,12 @@ knowsource:
   retrieval:
     max-distance: ${KNOWSOURCE_RETRIEVAL_MAX_DISTANCE:0.8}
     candidate-top-k: ${KNOWSOURCE_RETRIEVAL_CANDIDATE_TOP_K:15}
+  modular-rag:
+    compression-query:
+      enabled: ${KNOWSOURCE_COMPRESSION_QUERY_ENABLED:true}
+    multi-query:
+      enabled: ${KNOWSOURCE_MULTI_QUERY_ENABLED:true}
+      count: ${KNOWSOURCE_MULTI_QUERY_COUNT:2}
   embedding:
     dashscope:
       enabled: ${KNOWSOURCE_EMBEDDING_DASHSCOPE_ENABLED:false}

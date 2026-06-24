@@ -59,6 +59,49 @@ public class DocumentIndexOutboxService {
         return true;
     }
 
+    public void requeueFailedEvent(String docId, String eventId) {
+        transactionTemplate.executeWithoutResult(status -> {
+            IndexEventForRequeue event = jdbcClient.sql("""
+                    SELECT id, doc_id, kb_id, doc_version, event_type, status
+                    FROM document_publish_events
+                    WHERE id = :eventId AND doc_id = :docId
+                    FOR UPDATE
+                    """)
+                    .param("eventId", eventId)
+                    .param("docId", docId)
+                    .query(DocumentIndexOutboxService::mapEventForRequeue)
+                    .optional()
+                    .orElseThrow(() -> new IllegalArgumentException("Index event not found."));
+
+            if (!"FAILED".equals(event.status())) {
+                throw new IllegalArgumentException("Only FAILED index events can be requeued.");
+            }
+
+            jdbcClient.sql("""
+                    UPDATE document_publish_events
+                    SET status = 'PENDING',
+                        error_message = NULL,
+                        next_retry_at = NULL,
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        updated_at = NOW()
+                    WHERE id = :eventId
+                    """)
+                    .param("eventId", eventId)
+                    .update();
+
+            jdbcClient.sql("""
+                    UPDATE documents
+                    SET index_status = 'PENDING',
+                        vectors_synced_at = NULL
+                    WHERE id = :docId AND version = :docVersion
+                    """)
+                    .param("docId", event.docId())
+                    .param("docVersion", event.docVersion())
+                    .update();
+        });
+    }
+
     private void recoverStaleSyncingEvents() {
         transactionTemplate.executeWithoutResult(status -> jdbcClient.sql("""
                 WITH recovered AS (
@@ -200,6 +243,25 @@ public class DocumentIndexOutboxService {
                 rs.getString("kb_id"),
                 rs.getInt("doc_version"),
                 rs.getString("event_type"));
+    }
+
+    private static IndexEventForRequeue mapEventForRequeue(ResultSet rs, int rowNum) throws SQLException {
+        return new IndexEventForRequeue(
+                rs.getString("id"),
+                rs.getString("doc_id"),
+                rs.getString("kb_id"),
+                rs.getInt("doc_version"),
+                rs.getString("event_type"),
+                rs.getString("status"));
+    }
+
+    private record IndexEventForRequeue(
+            String id,
+            String docId,
+            String kbId,
+            int docVersion,
+            String eventType,
+            String status) {
     }
 
     private static String failureMessage(RuntimeException ex) {

@@ -5,7 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knowsource.document.ResourceNotFoundException;
-import com.knowsource.user.DemoUserService;
+import com.knowsource.security.CurrentUserService;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
@@ -25,12 +25,12 @@ class QaTraceService {
 
     private final JdbcClient jdbcClient;
     private final ObjectMapper objectMapper;
-    private final DemoUserService demoUserService;
+    private final CurrentUserService currentUserService;
 
-    QaTraceService(JdbcClient jdbcClient, ObjectMapper objectMapper, DemoUserService demoUserService) {
+    QaTraceService(JdbcClient jdbcClient, ObjectMapper objectMapper, CurrentUserService currentUserService) {
         this.jdbcClient = jdbcClient;
         this.objectMapper = objectMapper;
-        this.demoUserService = demoUserService;
+        this.currentUserService = currentUserService;
     }
 
     @Async("traceExecutor")
@@ -41,17 +41,18 @@ class QaTraceService {
     void record(QaTraceRecord record) {
         jdbcClient.sql("""
                 INSERT INTO qa_traces (
-                    id, user_id, kb_id, query, rewritten_query, retrieved_chunks, answer,
+                    id, session_id, user_id, kb_id, query, rewritten_query, retrieved_chunks, answer,
                     retrieval_ms, llm_ms, rewrite_llm_ms, generation_first_token_ms,
                     total_ms, token_usage, rag_profile
                 )
                 VALUES (
-                    :id, :userId, :kbId, :query, :rewrittenQuery, CAST(:retrievedChunks AS jsonb), :answer,
+                    :id, :sessionId, :userId, :kbId, :query, :rewrittenQuery, CAST(:retrievedChunks AS jsonb), :answer,
                     :retrievalMs, :llmMs, :rewriteLlmMs, :generationFirstTokenMs,
                     :totalMs, CAST(:tokenUsage AS jsonb), :ragProfile
                 )
                 """)
                 .param("id", record.id())
+                .param("sessionId", record.sessionId())
                 .param("userId", record.userId())
                 .param("kbId", record.kbId())
                 .param("query", record.query())
@@ -97,6 +98,7 @@ class QaTraceService {
         return jdbcClient.sql("""
                 SELECT
                     id,
+                    session_id,
                     kb_id,
                     user_id,
                     query,
@@ -122,7 +124,7 @@ class QaTraceService {
     }
 
     private void requireKbMember(String kbId) {
-        long userId = demoUserService.currentUserId();
+        long userId = currentUserService.currentUserId();
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members
@@ -163,6 +165,7 @@ class QaTraceService {
     private QaTraceDetailResponse mapDetail(ResultSet rs, int rowNum) throws SQLException {
         return new QaTraceDetailResponse(
                 rs.getString("id"),
+                rs.getString("session_id"),
                 rs.getString("kb_id"),
                 rs.getLong("user_id"),
                 rs.getString("query"),

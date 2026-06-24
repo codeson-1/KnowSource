@@ -14,4 +14,7 @@ public interface SourceStorageService {
             InputStream inputStream) throws IOException;
 
     InputStream open(String sourceKey) throws IOException;
+
+    default void delete(String sourceKey) throws IOException {
+    }
 }

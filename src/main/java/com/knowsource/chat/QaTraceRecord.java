@@ -5,6 +5,7 @@ import java.util.List;
 record QaTraceRecord(
         String id,
         long userId,
+        String sessionId,
         String kbId,
         String query,
         String rewrittenQuery,

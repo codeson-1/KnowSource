@@ -7,6 +7,7 @@ import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -64,9 +65,21 @@ public class DocumentController {
         return documentService.getLatestIngestTask(docId);
     }
 
+    @PostMapping("/documents/{docId}/ingest-task/retry")
+    public ResponseEntity<DocumentIngestResponse> retryLatestIngestTask(@PathVariable String docId) {
+        return ResponseEntity.accepted().body(documentService.retryLatestIngestTask(docId));
+    }
+
     @PostMapping("/documents/{docId}/publish")
     public ResponseEntity<DocumentPublishResponse> publish(@PathVariable String docId) {
         return ResponseEntity.accepted().body(documentService.publish(docId));
+    }
+
+    @PostMapping("/documents/{docId}/index-events/{eventId}/requeue")
+    public ResponseEntity<DocumentPublishResponse> requeueIndexEvent(
+            @PathVariable String docId,
+            @PathVariable String eventId) {
+        return ResponseEntity.accepted().body(documentService.requeueIndexEvent(docId, eventId));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -77,5 +90,10 @@ public class DocumentController {
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<Map<String, String>> handleNotFound(ResourceNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", ex.getMessage()));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<Map<String, String>> handleForbidden(AccessDeniedException ex) {
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", ex.getMessage()));
     }
 }

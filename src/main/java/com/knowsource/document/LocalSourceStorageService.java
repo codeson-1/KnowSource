@@ -8,10 +8,12 @@ import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 @Service
+@ConditionalOnProperty(prefix = "knowsource.storage", name = "type", havingValue = "local", matchIfMissing = true)
 public class LocalSourceStorageService implements SourceStorageService {
 
     private final Path rootPath;
@@ -49,6 +51,14 @@ public class LocalSourceStorageService implements SourceStorageService {
         Path source = rootPath.resolve(relativePath).normalize();
         ensureWithinRoot(source);
         return Files.newInputStream(source);
+    }
+
+    @Override
+    public void delete(String sourceKey) throws IOException {
+        String relativePath = sourceKey.startsWith("local://") ? sourceKey.substring("local://".length()) : sourceKey;
+        Path source = rootPath.resolve(relativePath).normalize();
+        ensureWithinRoot(source);
+        Files.deleteIfExists(source);
     }
 
     private void ensureWithinRoot(Path path) {

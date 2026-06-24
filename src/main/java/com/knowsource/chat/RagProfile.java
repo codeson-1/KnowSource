@@ -6,7 +6,8 @@ import org.springframework.util.StringUtils;
 
 enum RagProfile {
     AUTO("auto"),
-    NAIVE("naive");
+    NAIVE("naive"),
+    MODULAR("modular");
 
     private final String value;
 
@@ -30,6 +31,6 @@ enum RagProfile {
             }
         }
 
-        throw new IllegalArgumentException("profile must be auto or naive.");
+        throw new IllegalArgumentException("profile must be auto, naive, or modular.");
     }
 }

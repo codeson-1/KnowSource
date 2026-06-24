@@ -34,6 +34,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -41,6 +42,7 @@ import org.springframework.test.web.servlet.MvcResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
+@WithMockUser(username = "demo", roles = "ADMIN")
 class ChatControllerTest {
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -62,6 +64,8 @@ class ChatControllerTest {
     void cleanBusinessData() {
         FakeEmbeddingConfig.reset();
         jdbcClient.sql("DELETE FROM qa_traces").update();
+        jdbcClient.sql("DELETE FROM chat_messages").update();
+        jdbcClient.sql("DELETE FROM chat_sessions").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM vector_store").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();
@@ -160,6 +164,165 @@ class ChatControllerTest {
                 .query(String.class)
                 .single();
         assertThat(ragProfile).isEqualTo("naive");
+    }
+
+    @Test
+    void createsChatSessionAndPersistsConversationMessages() throws Exception {
+        String kbId = createKnowledgeBase("Session KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(not("")))
+                .andExpect(jsonPath("$.rewrittenQuery").doesNotExist())
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
+                .andReturn();
+
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String sessionId = body.path("sessionId").asText();
+        String traceId = body.path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        Long sessionCount = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chat_sessions
+                WHERE id = :sessionId AND kb_id = :kbId
+                """)
+                .param("sessionId", sessionId)
+                .param("kbId", kbId)
+                .query(Long.class)
+                .single();
+        Long messageCount = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM chat_messages
+                WHERE session_id = :sessionId
+                """)
+                .param("sessionId", sessionId)
+                .query(Long.class)
+                .single();
+        String traceSessionId = jdbcClient.sql("SELECT session_id FROM qa_traces WHERE id = :traceId")
+                .param("traceId", traceId)
+                .query(String.class)
+                .single();
+
+        assertThat(sessionCount).isEqualTo(1);
+        assertThat(messageCount).isEqualTo(2);
+        assertThat(traceSessionId).isEqualTo(sessionId);
+    }
+
+    @Test
+    void routesFollowUpWithSessionHistoryToModularAndStoresRewrittenQuery() throws Exception {
+        String kbId = createKnowledgeBase("Multi Turn KB");
+        String leaveDocId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        String securityDocId = createDocument(kbId, "Security Policy", "Security badges are required in the office.");
+        publishDocument(leaveDocId);
+        publishDocument(securityDocId);
+
+        MvcResult first = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "profile": "auto"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
+                .andExpect(jsonPath("$.sources[0].docId").value(leaveDocId))
+                .andReturn();
+        String sessionId = objectMapper.readTree(first.getResponse().getContentAsString()).path("sessionId").asText();
+
+        MvcResult followUp = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "What is its approval process?",
+                                  "profile": "auto",
+                                  "sessionId": "%s"
+                                }
+                                """.formatted(sessionId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(sessionId))
+                .andExpect(jsonPath("$.question").value("What is its approval process?"))
+                .andExpect(jsonPath("$.rewrittenQuery").value("How many annual leave days are available? What is its approval process?"))
+                .andExpect(jsonPath("$.ragProfile").value("modular"))
+                .andExpect(jsonPath("$.sources[0].docId").value(leaveDocId))
+                .andReturn();
+
+        String traceId = objectMapper.readTree(followUp.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        JsonNode trace = objectMapper.readTree(mockMvc.perform(get("/api/kbs/{kbId}/qa-traces/{traceId}", kbId, traceId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(sessionId))
+                .andExpect(jsonPath("$.query").value("What is its approval process?"))
+                .andExpect(jsonPath("$.rewrittenQuery").value("How many annual leave days are available? What is its approval process?"))
+                .andExpect(jsonPath("$.ragProfile").value("modular"))
+                .andReturn()
+                .getResponse()
+                .getContentAsString());
+        assertThat(trace.path("retrievedChunks").get(0).path("docId").asText()).isEqualTo(leaveDocId);
+    }
+
+    @Test
+    void modularProfileRunsTwoRetrievalQueriesAndMergesCandidates() throws Exception {
+        String kbId = createKnowledgeBase("Multi Query KB");
+        String leaveDocId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        String securityDocId = createDocument(kbId, "Security Policy", "Security badges are required in the office.");
+        publishDocument(leaveDocId);
+        publishDocument(securityDocId);
+
+        MvcResult first = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "Tell me about security badges.",
+                                  "profile": "auto"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ragProfile").value("naive"))
+                .andExpect(jsonPath("$.sources[0].docId").value(securityDocId))
+                .andReturn();
+        String sessionId = objectMapper.readTree(first.getResponse().getContentAsString()).path("sessionId").asText();
+        FakeEmbeddingConfig.reset();
+
+        MvcResult followUp = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "profile": "auto",
+                                  "sessionId": "%s",
+                                  "topK": 2
+                                }
+                                """.formatted(sessionId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ragProfile").value("modular"))
+                .andExpect(jsonPath("$.sources[*].docId").value(org.hamcrest.Matchers.hasItem(leaveDocId)))
+                .andExpect(jsonPath("$.sources[*].docId").value(org.hamcrest.Matchers.hasItem(securityDocId)))
+                .andReturn();
+
+        assertThat(FakeEmbeddingConfig.queryEmbeddingCalls()).isEqualTo(2);
+        String traceId = objectMapper.readTree(followUp.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        Long tracedSources = jdbcClient.sql("""
+                SELECT jsonb_array_length(retrieved_chunks)
+                FROM qa_traces
+                WHERE id = :traceId
+                """)
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(tracedSources).isEqualTo(2);
     }
 
     @Test
@@ -530,11 +693,11 @@ class ChatControllerTest {
                         .content("""
                                 {
                                   "question": "annual leave",
-                                  "profile": "modular"
+                                  "profile": "graph"
                                 }
                                 """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").value("profile must be auto or naive."));
+                .andExpect(jsonPath("$.message").value("profile must be auto, naive, or modular."));
     }
 
     private String createKnowledgeBase(String name) throws Exception {
@@ -714,9 +877,14 @@ class ChatControllerTest {
             String normalized = text.toLowerCase();
             if (normalized.contains("leave")) {
                 embedding[0] = 1.0f;
-            } else if (normalized.contains("security")) {
+            }
+            if (normalized.contains("approval") || normalized.contains("approve")) {
+                embedding[0] = 1.0f;
+            }
+            if (normalized.contains("security")) {
                 embedding[1] = 1.0f;
-            } else {
+            }
+            if (embedding[0] == 0.0f && embedding[1] == 0.0f) {
                 embedding[2] = 1.0f;
             }
             return embedding;

@@ -7,7 +7,7 @@ import java.util.stream.IntStream;
 
 import com.knowsource.ai.AiProviderException;
 import com.knowsource.document.ResourceNotFoundException;
-import com.knowsource.user.DemoUserService;
+import com.knowsource.security.CurrentUserService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.task.AsyncTaskExecutor;
@@ -27,39 +27,47 @@ public class ChatService {
             "\u5df2\u68c0\u7d22\u5230\u76f8\u5173\u77e5\u8bc6\uff0c\u4f46 AI \u670d\u52a1\u6682\u65f6\u7e41\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
 
     private final JdbcClient jdbcClient;
-    private final DemoUserService demoUserService;
+    private final CurrentUserService currentUserService;
     private final RagProfileRouter ragProfileRouter;
     private final VectorSearchService vectorSearchService;
     private final ObjectProvider<AnswerGenerator> answerGeneratorProvider;
     private final ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider;
     private final ObjectProvider<AsyncTaskExecutor> taskExecutorProvider;
     private final QaTraceService qaTraceService;
+    private final ChatSessionService chatSessionService;
+    private final QueryRewriteService queryRewriteService;
 
     public ChatService(
             JdbcClient jdbcClient,
-            DemoUserService demoUserService,
+            CurrentUserService currentUserService,
             RagProfileRouter ragProfileRouter,
             VectorSearchService vectorSearchService,
             ObjectProvider<AnswerGenerator> answerGeneratorProvider,
             ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider,
             @Qualifier("chatExecutor") ObjectProvider<AsyncTaskExecutor> taskExecutorProvider,
-            QaTraceService qaTraceService) {
+            QaTraceService qaTraceService,
+            ChatSessionService chatSessionService,
+            QueryRewriteService queryRewriteService) {
         this.jdbcClient = jdbcClient;
-        this.demoUserService = demoUserService;
+        this.currentUserService = currentUserService;
         this.ragProfileRouter = ragProfileRouter;
         this.vectorSearchService = vectorSearchService;
         this.answerGeneratorProvider = answerGeneratorProvider;
         this.streamingAnswerGeneratorProvider = streamingAnswerGeneratorProvider;
         this.taskExecutorProvider = taskExecutorProvider;
         this.qaTraceService = qaTraceService;
+        this.chatSessionService = chatSessionService;
+        this.queryRewriteService = queryRewriteService;
     }
 
     public ChatResponse answer(String kbId, ChatRequest request) {
         ChatContext context = prepareContext(kbId, request);
         if (context.refused()) {
             qaTraceService.recordAsync(traceRecord(context, context.fallbackAnswer(), 0, null));
+            chatSessionService.appendAssistantMessage(context.sessionId(), context.fallbackAnswer());
             return new ChatResponse(
-                    context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                    context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
+                    context.ragProfile().value(),
                     context.fallbackAnswer(), true,
                     context.sources());
         }
@@ -71,8 +79,10 @@ public class ChatService {
                 : generateAnswer(answerGenerator, context);
         int llmMs = answerGenerator == null ? 0 : elapsedMillis(llmStartedAt);
         qaTraceService.recordAsync(traceRecord(context, answer, llmMs, null));
+        chatSessionService.appendAssistantMessage(context.sessionId(), answer);
         return new ChatResponse(
-                context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
+                context.ragProfile().value(),
                 answer, false, context.sources());
     }
 
@@ -93,24 +103,31 @@ public class ChatService {
 
     private ChatContext prepareContext(String kbId, ChatRequest request) {
         long startedAt = System.nanoTime();
-        long userId = demoUserService.currentUserId();
+        long userId = currentUserService.currentUserId();
         requireKbMember(kbId, userId);
         String question = normalizeQuestion(request.question());
-        RagProfile ragProfile = ragProfileRouter.route(request);
+        ChatSessionHistory sessionHistory = chatSessionService.loadOrCreate(request.sessionId(), userId, kbId, question);
+        RagProfile ragProfile = ragProfileRouter.route(request, sessionHistory.hasMessages());
+        QueryRewriteResult rewriteResult = queryRewriteService.rewrite(question, sessionHistory.messages(), ragProfile);
+        chatSessionService.appendUserMessage(sessionHistory.sessionId(), question);
 
         long retrievalStartedAt = System.nanoTime();
-        List<RetrievedChunk> chunks = vectorSearchService.search(kbId, question, request.topK());
+        List<RetrievedChunk> chunks = vectorSearchService.search(kbId, rewriteResult.retrievalQueries(), request.topK());
         int retrievalMs = elapsedMillis(retrievalStartedAt);
         String traceId = UUID.randomUUID().toString();
         if (chunks.isEmpty()) {
             return new ChatContext(
-                    traceId, userId, startedAt, kbId, question, ragProfile, true, List.of(), EMPTY_CONTEXT_ANSWER,
+                    traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, rewriteResult.query(),
+                    rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, true, List.of(),
+                    EMPTY_CONTEXT_ANSWER,
                     retrievalMs);
         }
 
         List<SourceCitation> sources = toSources(chunks);
         return new ChatContext(
-                traceId, userId, startedAt, kbId, question, ragProfile, false, sources, draftAnswer(sources),
+                traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, rewriteResult.query(),
+                rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, false, sources,
+                draftAnswer(sources),
                 retrievalMs);
     }
 
@@ -146,10 +163,12 @@ public class ChatService {
             int llmMs = context.refused() || streamingAnswerGenerator == null ? 0 : elapsedMillis(generationStartedAt);
             Integer firstTokenMs = firstTokenAt[0] == 0 ? null : elapsedMillis(context.startedAtNanos(), firstTokenAt[0]);
             qaTraceService.recordAsync(traceRecord(context, answer.toString(), llmMs, firstTokenMs));
+            chatSessionService.appendAssistantMessage(context.sessionId(), answer.toString());
             emitter.send(SseEmitter.event()
                     .name("done")
                     .data(new ChatStreamDone(
-                                    context.traceId(), context.kbId(), context.question(), context.ragProfile().value(),
+                                    context.traceId(), context.sessionId(), context.kbId(), context.question(),
+                                    context.rewrittenQuery(), context.ragProfile().value(),
                                     context.refused(), answer.toString()),
                             MediaType.APPLICATION_JSON));
             emitter.complete();
@@ -243,14 +262,15 @@ public class ChatService {
         return new QaTraceRecord(
                 context.traceId(),
                 context.userId(),
+                context.sessionId(),
                 context.kbId(),
                 context.question(),
-                null,
+                context.rewrittenQuery(),
                 context.sources(),
                 answer,
                 context.retrievalMs(),
                 llmMs,
-                null,
+                context.rewriteMs(),
                 generationFirstTokenMs,
                 elapsedMillis(context.startedAtNanos()),
                 context.ragProfile().value());

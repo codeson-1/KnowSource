@@ -14,6 +14,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -22,6 +23,7 @@ import com.knowsource.user.DemoUserInitializer;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
+@WithMockUser(username = "demo", roles = "ADMIN")
 class KnowledgeBaseControllerTest {
 
     @Autowired
@@ -36,6 +38,8 @@ class KnowledgeBaseControllerTest {
     @BeforeEach
     void cleanBusinessData() {
         jdbcClient.sql("DELETE FROM qa_traces").update();
+        jdbcClient.sql("DELETE FROM chat_messages").update();
+        jdbcClient.sql("DELETE FROM chat_sessions").update();
         jdbcClient.sql("DELETE FROM document_publish_events").update();
         jdbcClient.sql("DELETE FROM chunk_children").update();
         jdbcClient.sql("DELETE FROM chunk_parents").update();

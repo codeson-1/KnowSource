@@ -3,8 +3,13 @@
 {"id":"security_badge","question":"What is required in the office for security?","expectedDocTitle":"Security Policy","expectedKeywords":["Security badges"],"outOfScope":false}
 {"id":"expense_deadline","question":"When should reimbursement receipts be submitted?","expectedDocTitle":"Expense Policy","expectedKeywords":["30 days"],"outOfScope":false}
 {"id":"remote_work","question":"How many remote work days are allowed each week?","expectedDocTitle":"Remote Work Policy","expectedKeywords":["2 days"],"outOfScope":false}
+{"id":"leave_table_carryover","question":"How many carryover leave days can move into the next year?","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["5"],"outOfScope":false}
+{"id":"expense_table_lodging","question":"What is the lodging reimbursement limit?","profile":"modular","expectedDocTitle":"Expense Policy","expectedKeywords":["800"],"outOfScope":false}
+{"id":"security_incident_cross_section","question":"Within how many hours should a lost badge be reported?","expectedDocTitle":"Security Policy","expectedKeywords":["24 hours"],"outOfScope":false}
 {"id":"followup_leave_approval","setupQuestion":"How many annual leave days are available?","question":"What is its approval process?","profile":"auto","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["manager approval"],"outOfScope":false}
 {"id":"followup_remote_approval","setupQuestion":"How many remote work days are allowed each week?","question":"Who approves it?","profile":"auto","expectedDocTitle":"Remote Work Policy","expectedKeywords":["team lead approval"],"outOfScope":false}
 {"id":"modular_multiquery_expense","setupQuestion":"What is required in the office for security?","question":"When should reimbursement receipts be submitted?","profile":"auto","expectedDocTitle":"Expense Policy","expectedKeywords":["30 days"],"outOfScope":false}
+{"id":"followup_expense_lodging","setupQuestion":"When should reimbursement receipts be submitted?","question":"What is the lodging limit in the table?","profile":"auto","expectedDocTitle":"Expense Policy","expectedKeywords":["800"],"outOfScope":false}
 {"id":"stock_code","question":"What is the company's stock ticker?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
 {"id":"cafeteria_menu","question":"What is tomorrow's cafeteria menu?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"ocr_scan_contract","question":"What does the scanned contract stamp say?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}

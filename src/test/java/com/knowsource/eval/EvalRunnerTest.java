@@ -101,13 +101,51 @@ class EvalRunnerTest {
 
     private void seedAndPublishDocuments(String kbId) throws Exception {
         publishDocument(createDocument(kbId, "Annual Leave Policy",
-                "Annual leave is 10 days. Annual leave requires manager approval before the planned absence."));
+                """
+                        # Annual Leave Policy
+
+                        ## Entitlement
+
+                        Annual leave is 10 days for full-time employees. Carryover is allowed for up to 5 unused days into the next calendar year.
+
+                        ## Approval Workflow
+
+                        Annual leave requires manager approval before the planned absence. Requests longer than 5 consecutive days also require HR review.
+                        """));
         publishDocument(createDocument(kbId, "Security Policy",
-                "Security badges are required in the office. Visitors must register at reception."));
+                """
+                        # Security Policy
+
+                        ## Office Access
+
+                        Security badges are required in the office. Visitors must register at reception and wear a visitor badge.
+
+                        ## Incident Reporting
+
+                        A lost badge must be reported to security within 24 hours so the access card can be disabled.
+                        """));
         publishDocument(createDocument(kbId, "Expense Policy",
-                "Reimbursement receipts should be submitted within 30 days through the finance portal."));
+                """
+                        # Expense Policy
+
+                        ## Submission Deadline
+
+                        Reimbursement receipts should be submitted within 30 days through the finance portal.
+
+                        ## Reimbursement Limits
+
+                        | Category | Limit |
+                        | --- | --- |
+                        | Meal | 120 |
+                        | Lodging | 800 |
+                        | Local transport | 300 |
+                        """));
         publishDocument(createDocument(kbId, "Remote Work Policy",
-                "Employees may work remotely 2 days each week after team lead approval."));
+                """
+                        # Remote Work Policy
+
+                        Employees may work remotely 2 days each week after team lead approval. Remote work should not be used on mandatory on-site training days.
+                        """));
     }
 
     private List<GoldenCase> loadGoldenSet() throws Exception {
@@ -132,12 +170,7 @@ class EvalRunnerTest {
     private String createDocument(String kbId, String title, String content) throws Exception {
         MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/documents", kbId)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "title": "%s",
-                                  "content": "%s"
-                                }
-                                """.formatted(title, content)))
+                        .content(objectMapper.writeValueAsString(new CreateDocumentPayload(title, content))))
                 .andExpect(status().isCreated())
                 .andExpect(header().string("Location", startsWith("/api/documents/")))
                 .andReturn();
@@ -272,6 +305,9 @@ class EvalRunnerTest {
             boolean outOfScope) {
     }
 
+    record CreateDocumentPayload(String title, String content) {
+    }
+
     record EvalCaseResult(
             String id,
             String setupQuestion,
@@ -381,10 +417,19 @@ class EvalRunnerTest {
             if (containsAny(normalized, "leave", "annual", "approve", "approval", "manager")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "security", "badge", "office", "visitor")) {
+            if (containsAny(normalized, "carryover", "unused")) {
+                categories.add("leave");
+            }
+            if (containsAny(normalized, "security", "badge", "office", "visitor", "lost")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "expense", "reimbursement", "receipt", "finance")) {
+            if (containsAny(normalized, "incident", "24 hours")) {
+                categories.add("security");
+            }
+            if (containsAny(normalized, "expense", "reimbursement", "receipt", "finance", "lodging")) {
+                categories.add("expense");
+            }
+            if (containsAny(normalized, "limit", "800")) {
                 categories.add("expense");
             }
             if (containsAny(normalized, "remote", "work", "week")) {

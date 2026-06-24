@@ -255,7 +255,7 @@ Implemented:
   - `DocumentIndexOutboxService` claims `PENDING/FAILED` events with `FOR UPDATE SKIP LOCKED`.
   - The claim transaction marks the outbox event and document as `SYNCING`.
   - Embedding and vector writes run outside the claim transaction.
-  - Success marks the event `DONE`, sets `processed_at`, and updates the document to `index_status=SYNCED`.
+  - Success marks the event `PROCESSED`, sets `processed_at`, and updates the document to `index_status=SYNCED`.
   - Failure marks the event/document failed, records `error_message`, increments `attempt_count`, and sets `next_retry_at` using configurable exponential backoff.
   - Retry policy is configured by `knowsource.index.retry.max-attempts`, `initial-delay-seconds`, and `max-delay-seconds`.
   - Failed index events can be manually requeued to `PENDING`.
@@ -281,15 +281,15 @@ Implemented:
   - `SpringAiDocumentEmbeddingGateway` adapts Spring AI `EmbeddingModel`.
   - Embedding requests are batched by `knowsource.index.embedding-batch-size` before vector rows are written.
   - Vector rows are written to `vector_store` with `kb_id`, `doc_id`, `status='published'`, and `doc_version` populated.
-  - Metadata includes `kbId`, `docId`, `docVersion`, `chunkId`, `parentChunkId`, `chunkIndex`, `pageNumber`, and `chunkType`.
+  - Metadata includes `kbId`, `docId`, `docVersion`, `chunkId`, `parentChunkId`, `chunkIndex`, `pageNumber`, `chunkType`, and nested ingestion metadata.
 
 Known gaps to align with the architecture:
 
 - W2 JSON ingestion is asynchronous for parsing/chunk persistence, but the raw source content is still passed from the request to an in-memory background task. Restart-safe source recovery applies to multipart upload paths through local or OSS-backed durable storage.
 - DashScope resilience is implemented for chat, embedding, and rerank calls.
 - Direct DashScope embedding with `text_type=document/query` is implemented but disabled by default to preserve the existing Spring AI embedding path unless `knowsource.embedding.dashscope.enabled=true` is explicitly set.
-- The stale indexing recovery timeout differs from the architecture. Current config defaults `knowsource.index.syncing-timeout-seconds` to 300 seconds, while the architecture describes `SYNCING > 30min` recovery. Later work should align the default or explicitly document the shorter MVP timeout.
-- Outbox terminal status naming differs from the architecture. The current implementation marks successful events as `DONE`, while the architecture tables and examples use `PROCESSED`. Later work should align the schema/code/docs vocabulary before adding operational tooling.
+- Stale indexing recovery now defaults `knowsource.index.syncing-timeout-seconds` to 1800 seconds, aligned with the architecture's `SYNCING > 30min` recovery rule.
+- Outbox terminal status naming is aligned with the architecture: successful events use `PROCESSED`.
 - Outbox retry controls are configurable, and failed events can be manually requeued.
 - OSS storage is implemented behind `SourceStorageService`, and an environment-backed smoke test is available. A real-bucket run still requires valid OSS credentials and network access.
 
@@ -299,14 +299,14 @@ Verified:
 - Tests verify:
   - Draft documents have no vector rows before publish.
   - Publishing creates a PENDING outbox event and returns `indexStatus=PENDING` without indexing synchronously.
-  - Explicit outbox processing creates a DONE outbox event.
+  - Explicit outbox processing creates a PROCESSED outbox event.
   - Explicit outbox processing writes one vector row per child chunk.
   - Explicit outbox processing batches embedding requests using the configured batch size while preserving chunk order.
   - Outbox failures use configurable exponential retry backoff and update the owning document to `index_status=FAILED`.
   - Failed index events can be requeued and then successfully processed by the outbox consumer.
   - Requeue rejects non-FAILED index events with HTTP 400.
   - Vector rows include the required `kb_id / doc_id / status / doc_version` columns.
-  - Vector row metadata includes page number and chunk type when chunk metadata is available.
+  - Vector row metadata includes page number, chunk type, section path, table caption, block index, and source offsets when chunk metadata is available.
   - Documents become `PUBLISHED` at publish time and `index_status=SYNCED` after successful outbox indexing.
   - Publishing is rejected when the latest ingest task is not `READY`.
 
@@ -511,10 +511,10 @@ EvalRunner/golden-set reporting is complete for the current backend demo path.
 
 Implemented:
 
-- `docs/eval/golden-set.jsonl` defines 10 baseline cases:
-  - 5 single-turn in-scope retrieval/citation cases.
-  - 3 multi-turn or modular retrieval cases.
-  - 2 out-of-scope refusal cases.
+- `docs/eval/golden-set.jsonl` defines 15 baseline cases:
+  - 8 single-turn in-scope retrieval/citation cases, including long-section, table, and cross-section questions.
+  - 4 multi-turn or modular retrieval cases.
+  - 3 out-of-scope refusal cases.
 - `src/test/java/com/knowsource/eval/EvalRunnerTest.java` seeds a deterministic evaluation knowledge base, publishes documents through the real publish/outbox path, asks questions through the production chat endpoint, and writes `docs/eval/report.md`.
 - The evaluation uses a deterministic test embedding gateway so the report is stable offline and does not depend on DashScope availability.
 - The generated report records total cases, in-scope/out-of-scope counts, Recall@5, citation hit rate, refusal accuracy, and per-case source titles/pass status.
@@ -522,9 +522,9 @@ Implemented:
 Latest report:
 
 - `docs/eval/report.md`
-- Total cases: 10
-- In-scope cases: 8
-- Out-of-scope cases: 2
+- Total cases: 15
+- In-scope cases: 12
+- Out-of-scope cases: 3
 - Recall@5: 100.0%
 - Citation hit rate: 100.0%
 - Refusal accuracy: 100.0%
@@ -551,10 +551,11 @@ Verified:
 - Document ingestion now supports JSON text ingestion plus multipart `.txt`/Markdown/PDF/Word upload backed by pluggable local or OSS durable source storage.
 - OSS integration is implemented as `OssSourceStorageService` and selected with `knowsource.storage.type=oss`; `OssSourceStorageSmokeTest` documents and automates real-bucket verification.
 - Markdown parsing preserves heading context and table blocks. PDF parsing preserves page numbers. Word parsing uses Apache Tika.
+- Chunking now uses semantic/recursive boundaries over paragraphs, sentences, and table/list lines. Chunk metadata records section path, table caption, source block index, and source offsets, and indexing carries that metadata into `vector_store.metadata`.
 - EvalRunner is implemented as a deterministic JUnit baseline and writes `docs/eval/report.md`; it is not yet exposed as an operator-facing API or dashboard.
 - Scanned PDFs/OCR, complex table reconstruction, and richer layout-aware extraction are still future work.
 - JSON text ingestion still carries request content in memory; restart-safe source recovery applies to the multipart upload path.
-- Chunking is still character-window based, but now operates on structured extracted blocks and preserves page/table metadata. Semantic/recursive splitting is not implemented yet.
+- Chunking is no longer a plain character-window splitter, but true semantic chunk quality still depends on the quality of upstream extraction.
 - Authentication/RBAC is implemented for the MVP backend. User administration APIs and self-service registration are still future work.
 - PowerShell `Invoke-WebRequest` threw a client-side null-reference error when reading SSE; `curl.exe --no-buffer` successfully verified the stream endpoint.
 
@@ -564,10 +565,9 @@ Continue completing the project core before spending time on the demo surface.
 
 Recommended order:
 
-1. Improve chunking quality further: semantic/recursive splitting, richer table metadata, and safer chunk boundaries.
-2. Add scanned-PDF/OCR handling and deeper table extraction as ingestion enhancements.
-3. Run the OSS smoke test against a real bucket in the target deployment environment.
-4. Align remaining architecture debt: outbox `DONE` vs `PROCESSED` vocabulary, `SYNCING` timeout default, and operational retry/recovery docs.
-5. Start preparing the demo surface and interview walkthrough after the ingestion-quality pass.
+1. Add scanned-PDF/OCR handling and deeper table extraction as ingestion enhancements.
+2. Run the OSS smoke test against a real bucket in the target deployment environment.
+3. Add an operator-facing eval endpoint or admin action around the current JUnit EvalRunner.
+4. Start preparing the demo surface and interview walkthrough after the remaining ingestion-quality pass.
 
 Demo surface and interview materials can wait until the project core is closer to complete.

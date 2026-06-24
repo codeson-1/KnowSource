@@ -4,6 +4,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -114,6 +115,87 @@ class AuthSecurityTest {
     void protectedApisRequireAuthentication() throws Exception {
         mockMvc.perform(get("/api/kbs"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void registerCreatesViewerUserAndReturnsTokens() throws Exception {
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "username": "newviewer",
+                                  "password": "newviewer",
+                                  "email": "newviewer@knowsource.local"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.accessToken").value(not("")))
+                .andExpect(jsonPath("$.refreshToken").value(not("")))
+                .andExpect(jsonPath("$.username").value("newviewer"))
+                .andExpect(jsonPath("$.globalRole").value("VIEWER"));
+
+        Long viewerUsers = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM users
+                WHERE username = 'newviewer' AND global_role = 'VIEWER'
+                """)
+                .query(Long.class)
+                .single();
+        org.assertj.core.api.Assertions.assertThat(viewerUsers).isEqualTo(1);
+    }
+
+    @Test
+    void adminCanCreateUsersAndChangeGlobalRole() throws Exception {
+        String adminToken = login("demo", "demo");
+
+        MvcResult created = mockMvc.perform(post("/api/auth/users")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "username": "editor",
+                                  "password": "editor",
+                                  "email": "editor@knowsource.local",
+                                  "globalRole": "EDITOR"
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.username").value("editor"))
+                .andExpect(jsonPath("$.globalRole").value("EDITOR"))
+                .andReturn();
+
+        long userId = objectMapper.readTree(created.getResponse().getContentAsString()).path("id").asLong();
+
+        mockMvc.perform(put("/api/auth/users/{userId}/role", userId)
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"globalRole\":\"ADMIN\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.globalRole").value("ADMIN"));
+
+        mockMvc.perform(get("/api/auth/users")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].username").exists());
+    }
+
+    @Test
+    void viewerCannotUseAdminUserApis() throws Exception {
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "username": "viewer",
+                                  "password": "viewer"
+                                }
+                                """))
+                .andExpect(status().isCreated());
+        String viewerToken = login("viewer", "viewer");
+
+        mockMvc.perform(get("/api/auth/users")
+                        .header("Authorization", "Bearer " + viewerToken))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.message").value("ADMIN access is required."));
     }
 
     @Test

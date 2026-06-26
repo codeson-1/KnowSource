@@ -18,6 +18,7 @@ import java.util.Locale;
 import java.util.Set;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.knowsource.chat.AnswerGenerator;
 import com.knowsource.chat.ChatResponse;
 import com.knowsource.index.DocumentEmbeddingGateway;
 import com.knowsource.index.DocumentIndexOutboxService;
@@ -388,6 +389,11 @@ class EvalRunnerTest {
                     return List.of(embedding(text));
                 }
             };
+        }
+
+        @Bean
+        AnswerGenerator answerGenerator() {
+            return (question, sources) -> "Eval answer for: " + question;
         }
 
         private static float[] embedding(String text) {

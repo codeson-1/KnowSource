@@ -39,6 +39,7 @@ public class JwtService {
                 "sub", user.username(),
                 "uid", user.id(),
                 "role", user.globalRole(),
+                "tv", user.tokenVersion(),
                 "iat", now,
                 "exp", now + accessTokenTtlSeconds));
     }
@@ -61,7 +62,8 @@ public class JwtService {
             return new CurrentUser(
                     ((Number) payload.get("uid")).longValue(),
                     payload.get("sub").toString(),
-                    payload.get("role").toString());
+                    payload.get("role").toString(),
+                    ((Number) payload.getOrDefault("tv", 0)).intValue());
         } catch (Exception ex) {
             throw new IllegalArgumentException("Invalid access token.", ex);
         }

@@ -1,4 +1,9 @@
 knowsource:
+  demo-user:
+    enabled: true
+  security:
+    jwt:
+      secret: db-test-only-change-me-db-test-only
   storage:
     type: local
     local:

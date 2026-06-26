@@ -1,6 +1,6 @@
 # KnowSource Project Summary
 
-Last updated: 2026-06-24
+Last updated: 2026-06-26
 
 ## Project Positioning
 
@@ -133,8 +133,14 @@ Implemented:
   - The demo user remains a local bootstrap/admin account, but production APIs now resolve the actor from Spring Security/JWT instead of using a fixed demo actor.
 - Authentication APIs:
   - `POST /api/auth/login`
+  - `POST /api/auth/register`
   - `POST /api/auth/refresh`
   - `POST /api/auth/logout`
+  - `GET /api/auth/users`
+  - `POST /api/auth/users`
+  - `PUT /api/auth/users/{userId}/role`
+  - Registration creates `VIEWER` users and returns access/refresh tokens.
+  - Admin APIs list users, create users, and update global roles.
   - Login validates stored password hashes through Spring Security `PasswordEncoder`.
   - Access tokens are stateless HS256 JWTs.
   - Refresh tokens are random opaque tokens; only SHA-256 hashes are stored in `refresh_tokens`.
@@ -142,16 +148,30 @@ Implemented:
 - Knowledge base APIs:
   - `POST /api/kbs`
   - `GET /api/kbs`
+  - `GET /api/kbs/{kbId}`
+  - `PUT /api/kbs/{kbId}`
+  - `DELETE /api/kbs/{kbId}`
+  - `GET /api/kbs/{kbId}/members`
+  - `POST /api/kbs/{kbId}/members`
+  - `PUT /api/kbs/{kbId}/members/{userId}`
+  - `DELETE /api/kbs/{kbId}/members/{userId}`
   - Creating a knowledge base also inserts an `OWNER` row into `kb_members`.
+  - Owners/admins can update or delete knowledge bases and manage `OWNER` / `EDITOR` / `VIEWER` memberships.
 - Minimum document ingestion APIs:
   - `POST /api/kbs/{kbId}/documents`
   - `POST /api/kbs/{kbId}/documents/upload`
+  - `PUT /api/documents/{docId}`
+  - `POST /api/documents/{docId}/replace-upload`
   - `GET /api/kbs/{kbId}/documents`
   - `GET /api/documents/{docId}`
   - `GET /api/documents/{docId}/ingest-task`
   - `POST /api/documents/{docId}/ingest-task/retry`
   - `GET /api/documents/{docId}/chunks`
+  - `GET /api/documents/{docId}/preview`
+  - `GET /api/documents/source-preview`
+  - `DELETE /api/documents/{docId}`
   - JSON `title + content` ingestion remains available and treats `content` as already extracted text.
+  - `GET /api/kbs/{kbId}/documents` now returns the latest ingest task id/status plus parent/child chunk counts for each row, so clients do not need per-document fan-out polling for table state.
   - Multipart upload is implemented for `.txt`, `.md`, `.markdown`, `.pdf`, `.doc`, and `.docx` files.
   - Uploaded source files are stored through `SourceStorageService`; `knowsource.storage.type=local` uses local durable storage, and `knowsource.storage.type=oss` uses the Aliyun OSS HTTP adapter.
   - Text files are read directly as UTF-8.
@@ -164,6 +184,8 @@ Implemented:
   - Multipart background ingestion reads the source from durable storage instead of carrying request content in memory.
   - Background ingestion marks tasks `PARSING`, then `READY` after chunks are persisted, or `FAILED` if parsing/persistence fails.
   - Failed multipart ingest tasks can be retried from any durable uploaded source, including local or OSS-backed storage.
+  - Replacing a document increments `documents.version`, clears old vectors, moves the document back to `DRAFT`, and rebuilds chunks for the new version.
+  - Hard-deleting a document removes vectors, outbox rows, chunks, ingest tasks, the document row, and uploaded local/OSS source data on a best-effort cleanup path.
   - The create-document API returns immediately with `ingestStatus=PENDING`; clients can poll `GET /api/documents/{docId}/ingest-task` for status and chunk counts.
   - Ingest transaction boundaries were adjusted so a failed parse/persist step can leave an `ingest_tasks.status=FAILED` record instead of being rolled back with the document creation transaction.
   - Extracted blocks are split by `SimpleTextChunker` into parent chunks of about 1200 characters and child chunks of about 400 characters while preserving page number and chunk type metadata where available.
@@ -217,6 +239,10 @@ Verified:
   - Logout revokes the supplied refresh token.
   - Protected APIs reject unauthenticated requests with HTTP 401.
   - VIEWER members can list/read their knowledge bases but cannot upload/write documents.
+  - `POST /api/auth/register` creates a `VIEWER` account and returns tokens.
+  - Admin user APIs can list users, create users, and update global roles.
+  - Knowledge base owners/admins can update/delete a knowledge base and manage members.
+  - A knowledge base cannot lose its last `OWNER`.
   - `POST /api/kbs` creates a knowledge base.
   - Creating a knowledge base creates an `OWNER` membership.
   - `GET /api/kbs` returns the demo user's knowledge bases.
@@ -237,6 +263,7 @@ Verified:
   - Unsupported multipart file types are rejected with HTTP 400.
   - OSS smoke test stores, reads, and deletes a real OSS object when `KNOWSOURCE_OSS_SMOKE_ENABLED=true`; it skips by default when credentials are absent.
   - Missing knowledge bases return HTTP 404.
+  - `DELETE /api/documents/{docId}` cascades document-owned database data and removes the uploaded local source file.
 
 ## W3 Publish/Index Flow Status
 
@@ -246,11 +273,14 @@ Implemented:
 
 - Publish API:
   - `POST /api/documents/{docId}/publish`
+  - `POST /api/documents/{docId}/archive`
   - `POST /api/documents/{docId}/index-events/{eventId}/requeue`
+  - `POST /api/documents/{docId}/index/retry`
   - Requires the current JWT user to be a knowledge base member with write access (`OWNER`, `EDITOR`, or global `ADMIN`).
   - Requires the latest ingest task to be `READY`.
   - Updates the document to `status=PUBLISHED`, `index_status=PENDING`, and sets `published_at`.
   - Creates a `document_publish_events` outbox row with `event_type=PUBLISH`.
+  - Archive removes document vectors and changes the document to `status=ARCHIVED`, `index_status=NONE`.
 - Outbox consumer:
   - `DocumentIndexOutboxService` claims `PENDING/FAILED` events with `FOR UPDATE SKIP LOCKED`.
   - The claim transaction marks the outbox event and document as `SYNCING`.
@@ -258,7 +288,8 @@ Implemented:
   - Success marks the event `PROCESSED`, sets `processed_at`, and updates the document to `index_status=SYNCED`.
   - Failure marks the event/document failed, records `error_message`, increments `attempt_count`, and sets `next_retry_at` using configurable exponential backoff.
   - Retry policy is configured by `knowsource.index.retry.max-attempts`, `initial-delay-seconds`, and `max-delay-seconds`.
-  - Failed index events can be manually requeued to `PENDING`.
+  - Failed index events can be manually requeued to `PENDING` either by event id or by asking the backend to retry the latest failed event for the document.
+  - Manual index retry clears the event's `attempt_count` so an exhausted failed event is claimable again.
 - Background polling:
   - `DocumentIndexEventPoller` scans pending events on a fixed delay.
   - Scheduled polling only triggers work; outbox processing runs on the isolated `indexExecutor`.
@@ -304,10 +335,13 @@ Verified:
   - Explicit outbox processing batches embedding requests using the configured batch size while preserving chunk order.
   - Outbox failures use configurable exponential retry backoff and update the owning document to `index_status=FAILED`.
   - Failed index events can be requeued and then successfully processed by the outbox consumer.
+  - A document's latest failed index event can be retried directly through `POST /api/documents/{docId}/index/retry` without the frontend remembering an event id.
   - Requeue rejects non-FAILED index events with HTTP 400.
   - Vector rows include the required `kb_id / doc_id / status / doc_version` columns.
   - Vector row metadata includes page number, chunk type, section path, table caption, block index, and source offsets when chunk metadata is available.
   - Documents become `PUBLISHED` at publish time and `index_status=SYNCED` after successful outbox indexing.
+  - Archiving a published document removes vector rows and makes it non-searchable.
+  - Replacing a published document removes previous vectors, increments version, and indexes only the current version after the next publish.
   - Publishing is rejected when the latest ingest task is not `READY`.
 
 ## W3 Production Retrieval and Q&A Status
@@ -507,7 +541,7 @@ Verified:
 
 ## Evaluation Baseline Status
 
-EvalRunner/golden-set reporting is complete for the current backend demo path.
+EvalRunner/golden-set reporting is complete for the current backend demo path and is now exposed through admin-only backend APIs.
 
 Implemented:
 
@@ -516,6 +550,8 @@ Implemented:
   - 4 multi-turn or modular retrieval cases.
   - 3 out-of-scope refusal cases.
 - `src/test/java/com/knowsource/eval/EvalRunnerTest.java` seeds a deterministic evaluation knowledge base, publishes documents through the real publish/outbox path, asks questions through the production chat endpoint, and writes `docs/eval/report.md`.
+- `POST /api/eval/golden-set/run` runs the golden set through the backend service path, creates an evaluation knowledge base, publishes/indexes seed documents, asks questions through production Q&A, writes `docs/eval/report.md`, and returns the summary plus per-case results.
+- `GET /api/eval/golden-set/report` returns the latest markdown report for operator/admin review.
 - The evaluation uses a deterministic test embedding gateway so the report is stable offline and does not depend on DashScope availability.
 - The generated report records total cases, in-scope/out-of-scope counts, Recall@5, citation hit rate, refusal accuracy, and per-case source titles/pass status.
 
@@ -537,6 +573,122 @@ Verified:
 - `docker compose ps postgres` confirmed `knowsource-postgres` is running and healthy.
 - `Test-NetConnection localhost:15432` succeeded.
 - `.\mvnw.cmd "-Dtest=ChatControllerTest,EvalRunnerTest" test` passed with 22 tests, 0 failures, 0 errors.
+- `.\mvnw.cmd "-Dtest=DocumentControllerTest,EvalControllerTest" test` passed with 15 tests, 0 failures, 0 errors.
+- `.\mvnw.cmd test` passed with 80 tests, 0 failures, 0 errors, and 1 skipped OSS smoke test.
+- `.\mvnw.cmd "-Dtest=DocumentControllerTest,DocumentPublishControllerTest" test` passed after the document-list aggregation and direct retry-index changes.
+- `.\mvnw.cmd "-Dtest=OssSourceStorageSmokeTest" test` was run on 2026-06-26 and skipped because the current shell has no `KNOWSOURCE_OSS_SMOKE_ENABLED=true` / real OSS bucket credentials.
+
+## Frontend Demo Surface Status
+
+The frontend demo surface is implemented as a Vue 3 + TypeScript + Vite console application under `frontend/`. It is focused on interview demo clarity and opens directly into authenticated product workflows rather than a marketing page.
+
+Implemented route-level structure:
+
+- `/login`
+  - Username/password login.
+  - Store access token and refresh token client-side for the MVP demo session.
+  - Redirect to the knowledge base list after login.
+- `/register`
+  - Username, password, and email registration.
+  - Registered users default to global `VIEWER`.
+- `/kbs`
+  - List knowledge bases accessible to the current user.
+  - Create, edit, and delete knowledge bases.
+  - Enter a selected knowledge base workspace.
+- `/kbs/{kbId}`
+  - Main knowledge base workspace.
+  - Top area shows knowledge base name, description, and the current member role.
+  - Tabs organize the real work: `Documents`, `Chat`, `Members`, `QaTrace`, and `Evaluation`.
+- `/admin/users`
+  - ADMIN-only system user management.
+  - List users, create users, and update global roles (`ADMIN`, `EDITOR`, `VIEWER`).
+
+Implemented workspace tabs:
+
+- `Documents`
+  - Document list with title, file type, document status, index status, latest ingest status, parent/child chunk counts, version, publish time, and vector sync time.
+  - Actions: view details, replace upload, publish, archive, delete, retry ingest, and retry index.
+  - Retry index calls the direct latest-failed-event endpoint and no longer depends on a client-remembered publish event id.
+  - Upload uses a dialog instead of a separate page.
+  - Document details use a drawer showing base metadata, latest ingest task status, chunk counts, child chunks, page number, chunk type, chunk content, and preview/download entry.
+  - Source preview is fetched through Axios as a blob before opening, so the protected endpoint receives the Bearer JWT header.
+- `Chat`
+  - Question input.
+  - `profile` selector: `auto`, `naive`, `modular`.
+  - `topK` numeric input or slider.
+  - SSE streaming answer area.
+  - Source citations list with source index, document title, snippet, page number, similarity score, and a link to document detail/preview.
+  - Keep `sessionId` for multi-turn chat.
+- `Members`
+  - Member list.
+  - Add member by username.
+  - Update member role: `OWNER`, `EDITOR`, `VIEWER`.
+  - Remove member.
+  - Surface backend errors clearly, especially the "cannot remove the last OWNER" guard.
+- `QaTrace`
+  - Trace list with question, `ragProfile`, source count, `totalMs`, answer preview, and created time. Full timing fields are available in the detail API.
+  - Trace detail uses a drawer, not a separate page.
+  - Detail shows original query, rewritten query, final answer, retrieved chunks, timing breakdown, `sessionId`, and sources.
+- `Evaluation`
+  - Run Golden Set evaluation.
+  - Show total cases, Recall@5, citation hit rate, and refusal accuracy.
+  - Show per-case pass/fail.
+  - Render the latest `report.md` content with `markdown-it` (`html: false`, `linkify: true`, `breaks: true`).
+
+Phased implementation target:
+
+1. Phase 1: Demo-critical flow
+   - Build login/register, knowledge base list, and the knowledge base workspace shell.
+   - Implement `Documents`, `Chat`, and baseline `QaTrace` tabs.
+   - Preserve the end-to-end demo path: login -> create/select KB -> upload/ingest document -> publish/index -> ask -> view citations -> inspect QaTrace.
+2. Phase 2: Operational depth
+   - Add `Members` tab.
+   - Add upload dialog, document detail drawer, source preview dialog/link, QaTrace detail drawer, and `Evaluation` tab.
+   - Add clear empty states, loading states, polling for ingest/index progress, and actionable backend error messages.
+3. Phase 3: Admin and polish
+   - Add `/admin/users`.
+   - Add richer report display for `report.md`.
+   - Improve responsive behavior, keyboard/focus states, and final visual polish.
+
+Frontend-supporting backend hardening completed:
+
+- Document list includes latest ingest task status and chunk counts, avoiding per-row fan-out for the table view.
+- Retry index uses `POST /api/documents/{docId}/index/retry`, so the frontend no longer has to remember an outbox event id.
+- Source preview/download is opened from an Axios blob request, so Bearer-token-only auth works for local and OSS-backed sources.
+- Golden Set report API exists and the frontend renders `report.md` with `markdown-it`; raw HTML is disabled in the Markdown renderer.
+
+Key frontend files:
+
+- `frontend/src/router.ts`
+- `frontend/src/api/http.ts`
+- `frontend/src/api/auth.ts`
+- `frontend/src/api/kbs.ts`
+- `frontend/src/api/documents.ts`
+- `frontend/src/api/chatStream.ts`
+- `frontend/src/api/traces.ts`
+- `frontend/src/api/eval.ts`
+- `frontend/src/stores/auth.ts`
+- `frontend/src/layouts/ConsoleLayout.vue`
+- `frontend/src/views/LoginView.vue`
+- `frontend/src/views/RegisterView.vue`
+- `frontend/src/views/KbListView.vue`
+- `frontend/src/views/WorkspaceView.vue`
+- `frontend/src/views/AdminUsersPlaceholder.vue`
+- `frontend/src/views/workspace/DocumentsTab.vue`
+- `frontend/src/views/workspace/ChatTab.vue`
+- `frontend/src/views/workspace/MembersTab.vue`
+- `frontend/src/views/workspace/QaTraceTab.vue`
+- `frontend/src/views/workspace/EvaluationTab.vue`
+- `frontend/src/components/SourceList.vue`
+- `frontend/src/components/StatusTag.vue`
+- `frontend/package.json` (`markdown-it` and `@types/markdown-it`)
+
+Verified:
+
+- `npm.cmd run build` passed.
+- `npm.cmd run build` passed again after document-list aggregation, direct retry-index, and blob source-preview changes.
+- Vite dev server started successfully on `http://127.0.0.1:3001/` after port `3000` was already in use.
+- Earlier attempts to bind `5173`, `5174`, and `5175` returned `EACCES` in the current Windows desktop environment.
 
 ## Current Limitations
 
@@ -552,22 +704,23 @@ Verified:
 - OSS integration is implemented as `OssSourceStorageService` and selected with `knowsource.storage.type=oss`; `OssSourceStorageSmokeTest` documents and automates real-bucket verification.
 - Markdown parsing preserves heading context and table blocks. PDF parsing preserves page numbers. Word parsing uses Apache Tika.
 - Chunking now uses semantic/recursive boundaries over paragraphs, sentences, and table/list lines. Chunk metadata records section path, table caption, source block index, and source offsets, and indexing carries that metadata into `vector_store.metadata`.
-- EvalRunner is implemented as a deterministic JUnit baseline and writes `docs/eval/report.md`; it is not yet exposed as an operator-facing API or dashboard.
+- EvalRunner is implemented as a deterministic JUnit baseline and as admin-only operator APIs; the frontend Evaluation tab can run it and display summary metrics, per-case results, and the latest report.
 - Scanned PDFs/OCR, complex table reconstruction, and richer layout-aware extraction are still future work.
 - JSON text ingestion still carries request content in memory; restart-safe source recovery applies to the multipart upload path.
 - Chunking is no longer a plain character-window splitter, but true semantic chunk quality still depends on the quality of upstream extraction.
-- Authentication/RBAC is implemented for the MVP backend. User administration APIs and self-service registration are still future work.
+- Authentication/RBAC, self-service registration, admin user APIs, and knowledge-base member management are implemented for the MVP backend.
+- The frontend interview console is implemented through Phase 3, including login/register, knowledge base CRUD, document upload/detail/chunks/preview/retry/publish flow, SSE chat, source citations, members, QaTrace detail drawer, Golden Set evaluation, and ADMIN user management.
+- Real OSS bucket smoke verification still requires a shell with `KNOWSOURCE_OSS_SMOKE_ENABLED=true` and valid OSS endpoint/bucket/access-key variables; the current local run skipped due missing credentials.
 - PowerShell `Invoke-WebRequest` threw a client-side null-reference error when reading SSE; `curl.exe --no-buffer` successfully verified the stream endpoint.
 
 ## Recommended Next Step
 
-Continue completing the project core before spending time on the demo surface.
+The backend MVP core and frontend interview demo surface are complete enough for end-to-end rehearsal.
 
 Recommended order:
 
-1. Add scanned-PDF/OCR handling and deeper table extraction as ingestion enhancements.
+1. Run the full 3-minute demo rehearsal: login -> create/select KB -> upload -> wait READY -> publish -> wait SYNCED -> ask -> inspect sources -> inspect QaTrace -> optionally run Evaluation/Admin Users.
 2. Run the OSS smoke test against a real bucket in the target deployment environment.
-3. Add an operator-facing eval endpoint or admin action around the current JUnit EvalRunner.
-4. Start preparing the demo surface and interview walkthrough after the remaining ingestion-quality pass.
+3. Treat scanned-PDF/OCR handling, complex table reconstruction, richer layout-aware extraction, and richer markdown report rendering as post-MVP enhancements.
 
-Demo surface and interview materials can wait until the project core is closer to complete.
+Demo rehearsal and interview narration are now the recommended next focus.

@@ -3,6 +3,7 @@ package com.knowsource.document;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.startsWith;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -136,7 +137,11 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(1)))
                 .andExpect(jsonPath("$[0].title").value("Release Notes"))
-                .andExpect(jsonPath("$[0].status").value("DRAFT"));
+                .andExpect(jsonPath("$[0].status").value("DRAFT"))
+                .andExpect(jsonPath("$[0].latestIngestTaskId").isNotEmpty())
+                .andExpect(jsonPath("$[0].latestIngestStatus").value("READY"))
+                .andExpect(jsonPath("$[0].parentChunkCount").value(greaterThan(0)))
+                .andExpect(jsonPath("$[0].childChunkCount").value(greaterThan(0)));
     }
 
     @Test
@@ -194,6 +199,59 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content()
                         .string(org.hamcrest.Matchers.containsString("durable local storage")));
+    }
+
+    @Test
+    void deletesDocumentCascadeDataAndStoredSource() throws Exception {
+        String kbId = createKnowledgeBase("Delete Document KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "delete-me.md",
+                "text/markdown",
+                """
+                        # Delete Me
+
+                        This uploaded document should remove chunks and source data when deleted.
+                        """.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Delete Me"))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String docId = body.path("document").path("id").asText();
+        String sourceKey = body.path("document").path("ossKey").asText();
+        Path storedSource = Path.of("target/test-sources").resolve(sourceKey.substring("local://".length()));
+        waitForIngestReady(docId);
+        org.assertj.core.api.Assertions.assertThat(Files.exists(storedSource)).isTrue();
+
+        mockMvc.perform(delete("/api/documents/{docId}", docId))
+                .andExpect(status().isNoContent());
+
+        Long documentRows = jdbcClient.sql("SELECT COUNT(*) FROM documents WHERE id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long taskRows = jdbcClient.sql("SELECT COUNT(*) FROM ingest_tasks WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long parentRows = jdbcClient.sql("SELECT COUNT(*) FROM chunk_parents WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long childRows = jdbcClient.sql("SELECT COUNT(*) FROM chunk_children WHERE doc_id = :docId")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        org.assertj.core.api.Assertions.assertThat(documentRows).isZero();
+        org.assertj.core.api.Assertions.assertThat(taskRows).isZero();
+        org.assertj.core.api.Assertions.assertThat(parentRows).isZero();
+        org.assertj.core.api.Assertions.assertThat(childRows).isZero();
+        org.assertj.core.api.Assertions.assertThat(Files.exists(storedSource)).isFalse();
     }
 
     @Test

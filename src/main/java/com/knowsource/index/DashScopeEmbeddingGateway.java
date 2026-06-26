@@ -32,12 +32,14 @@ public class DashScopeEmbeddingGateway implements DocumentEmbeddingGateway {
     public DashScopeEmbeddingGateway(
             RestClient.Builder restClientBuilder,
             AiProviderResilience aiProviderResilience,
-            @Value("${knowsource.embedding.dashscope.api-key:${AI_DASHSCOPE_API_KEY:}}") String apiKey,
+            @Value("${knowsource.embedding.dashscope.api-key:}") String dashScopeApiKey,
+            @Value("${spring.ai.openai.api-key:}") String springAiOpenAiApiKey,
+            @Value("${AI_DASHSCOPE_API_KEY:}") String envApiKey,
             @Value("${knowsource.embedding.dashscope.endpoint:https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}") String endpoint,
             @Value("${knowsource.embedding.dashscope.model:text-embedding-v3}") String model) {
         this.restClient = restClientBuilder.build();
         this.aiProviderResilience = aiProviderResilience;
-        this.apiKey = apiKey;
+        this.apiKey = firstText(dashScopeApiKey, springAiOpenAiApiKey, envApiKey);
         this.endpoint = endpoint;
         this.model = model;
     }
@@ -79,7 +81,7 @@ public class DashScopeEmbeddingGateway implements DocumentEmbeddingGateway {
         }
 
         return response.data().stream()
-                .sorted(java.util.Comparator.comparingInt(EmbeddingData::index))
+                .sorted(java.util.Comparator.comparingInt(EmbeddingData::sortIndex))
                 .map(EmbeddingData::embedding)
                 .map(DashScopeEmbeddingGateway::toFloatArray)
                 .toList();
@@ -91,6 +93,15 @@ public class DashScopeEmbeddingGateway implements DocumentEmbeddingGateway {
             embedding[i] = values.get(i).floatValue();
         }
         return embedding;
+    }
+
+    private static String firstText(String... values) {
+        for (String value : values) {
+            if (StringUtils.hasText(value)) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private record EmbeddingRequest(
@@ -105,6 +116,19 @@ public class DashScopeEmbeddingGateway implements DocumentEmbeddingGateway {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    private record EmbeddingData(int index, List<Double> embedding) {
+    private record EmbeddingData(
+            Integer index,
+            @JsonProperty("text_index") Integer textIndex,
+            List<Double> embedding) {
+
+        private int sortIndex() {
+            if (textIndex != null) {
+                return textIndex;
+            }
+            if (index != null) {
+                return index;
+            }
+            return 0;
+        }
     }
 }

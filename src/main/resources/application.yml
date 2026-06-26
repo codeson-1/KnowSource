@@ -47,10 +47,40 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ${KNOWSOURCE_MANAGEMENT_ENDPOINTS:health,info,prometheus,metrics}
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    distribution:
+      percentiles-histogram:
+        knowsource.rag.retrieval: true
+        knowsource.rag.generation_first_token: true
+        knowsource.ingest.index.success: true
+      percentiles:
+        knowsource.rag.retrieval: 0.5,0.95
+        knowsource.rag.generation_first_token: 0.5,0.95
+        knowsource.ingest.index.success: 0.5,0.95
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  health:
+    db:
+      enabled: true
+
 knowsource:
+  demo-user:
+    # Disabled by default. Enable only for local/demo/test deployments via
+    # KNOWSOURCE_DEMO_USER_ENABLED=true. Production must leave this unset (false).
+    enabled: ${KNOWSOURCE_DEMO_USER_ENABLED:false}
   security:
     jwt:
-      secret: ${KNOWSOURCE_JWT_SECRET:dev-only-change-me-dev-only-change-me}
+      secret: ${KNOWSOURCE_JWT_SECRET:}
       access-token-ttl-seconds: ${KNOWSOURCE_JWT_ACCESS_TOKEN_TTL_SECONDS:900}
     refresh-token-ttl-days: ${KNOWSOURCE_REFRESH_TOKEN_TTL_DAYS:7}
   storage:

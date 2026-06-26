@@ -31,6 +31,10 @@ The access key needs OSS object permissions for the configured prefix:
 
 When `KNOWSOURCE_OSS_SMOKE_ENABLED` is not `true`, the test is skipped.
 
+## Latest Local Result
+
+2026-06-26: `.\mvnw.cmd "-Dtest=OssSourceStorageSmokeTest" test` completed with 1 skipped test because the current shell did not provide `KNOWSOURCE_OSS_SMOKE_ENABLED=true` or real OSS bucket credentials. A real-bucket verification still needs to be run in the target credentialed environment.
+
 ## Production Switch
 
 Use the OSS storage adapter in the application by setting:

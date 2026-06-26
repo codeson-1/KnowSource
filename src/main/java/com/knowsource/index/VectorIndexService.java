@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -17,19 +19,24 @@ import org.springframework.util.StringUtils;
 @Service
 public class VectorIndexService {
 
+    static final String METRIC_INDEX_SUCCESS = "knowsource.ingest.index.success";
+
     private final JdbcClient jdbcClient;
     private final ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider;
     private final TransactionTemplate transactionTemplate;
+    private final MeterRegistry meterRegistry;
     private final int embeddingBatchSize;
 
     public VectorIndexService(
             JdbcClient jdbcClient,
             ObjectProvider<DocumentEmbeddingGateway> embeddingGatewayProvider,
             TransactionTemplate transactionTemplate,
+            MeterRegistry meterRegistry,
             @Value("${knowsource.index.embedding-batch-size:16}") int embeddingBatchSize) {
         this.jdbcClient = jdbcClient;
         this.embeddingGatewayProvider = embeddingGatewayProvider;
         this.transactionTemplate = transactionTemplate;
+        this.meterRegistry = meterRegistry;
         this.embeddingBatchSize = normalizeBatchSize(embeddingBatchSize);
     }
 
@@ -43,6 +50,19 @@ public class VectorIndexService {
             throw new IllegalStateException("Document embedding gateway is not available.");
         }
 
+        long startedAt = System.nanoTime();
+        try {
+            int indexed = doReindex(embeddingGateway, kbId, docId, docVersion);
+            recordIndexSuccess(kbId, System.nanoTime() - startedAt, "success");
+            return indexed;
+        } catch (RuntimeException ex) {
+            recordIndexSuccess(kbId, System.nanoTime() - startedAt, "failure");
+            throw ex;
+        }
+    }
+
+    private int doReindex(
+            DocumentEmbeddingGateway embeddingGateway, String kbId, String docId, int docVersion) {
         List<ChunkForIndex> chunks = loadChunks(docId, docVersion);
         if (CollectionUtils.isEmpty(chunks)) {
             throw new IllegalStateException("Document has no chunks to index.");
@@ -162,5 +182,13 @@ public class VectorIndexService {
 
     private static int normalizeBatchSize(int batchSize) {
         return Math.max(1, batchSize);
+    }
+
+    private void recordIndexSuccess(String kbId, long durationNanos, String outcome) {
+        Timer.builder(METRIC_INDEX_SUCCESS)
+                .tag("kbId", kbId)
+                .tag("outcome", outcome)
+                .register(meterRegistry)
+                .record(java.time.Duration.ofNanos(durationNanos));
     }
 }

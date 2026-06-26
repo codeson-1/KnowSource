@@ -70,11 +70,60 @@ class DashScopeEmbeddingGatewayTest {
         server.verify();
     }
 
+    @Test
+    void responseCanUseDashScopeTextIndexField() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        DashScopeEmbeddingGateway gateway = gateway(builder);
+
+        server.expect(requestTo("https://dashscope.example/v1/embeddings"))
+                .andRespond(withSuccess("""
+                        {
+                          "data": [
+                            {"text_index": 1, "embedding": [0.3, 0.4]},
+                            {"text_index": 0, "embedding": [0.1, 0.2]}
+                          ]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        List<float[]> embeddings = gateway.embedDocuments(List.of("first", "second"));
+
+        assertThat(embeddings).hasSize(2);
+        assertThat(embeddings.get(0)).containsExactly(0.1f, 0.2f);
+        assertThat(embeddings.get(1)).containsExactly(0.3f, 0.4f);
+        server.verify();
+    }
+
+    @Test
+    void apiKeyCanFallbackToSpringAiOpenAiKey() {
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        DashScopeEmbeddingGateway gateway = new DashScopeEmbeddingGateway(
+                builder,
+                resilience(),
+                "",
+                "spring-ai-key",
+                "",
+                "https://dashscope.example/v1/embeddings",
+                "text-embedding-v3");
+
+        server.expect(requestTo("https://dashscope.example/v1/embeddings"))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, "Bearer spring-ai-key"))
+                .andRespond(withSuccess(responseJson(), MediaType.APPLICATION_JSON));
+
+        List<float[]> embeddings = gateway.embedDocuments(List.of("policy text"));
+
+        assertThat(embeddings).hasSize(1);
+        server.verify();
+    }
+
     private static DashScopeEmbeddingGateway gateway(RestClient.Builder builder) {
         return new DashScopeEmbeddingGateway(
                 builder,
                 resilience(),
                 "test-key",
+                "",
+                "",
                 "https://dashscope.example/v1/embeddings",
                 "text-embedding-v3");
     }

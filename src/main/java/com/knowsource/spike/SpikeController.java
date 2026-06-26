@@ -19,7 +19,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/spike")
-@ConditionalOnProperty(prefix = "knowsource.spike", name = "enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(prefix = "knowsource.spike", name = "enabled", havingValue = "true")
 public class SpikeController {
 
     private static final String KB_ID = "kb-spike";

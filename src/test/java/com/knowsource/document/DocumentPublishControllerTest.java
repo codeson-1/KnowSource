@@ -2,6 +2,7 @@ package com.knowsource.document;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.startsWith;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -420,11 +421,16 @@ class DocumentPublishControllerTest {
                 .param("eventId", eventId)
                 .query(String.class)
                 .single();
+        Integer attemptCount = jdbcClient.sql("SELECT attempt_count FROM document_publish_events WHERE id = :eventId")
+                .param("eventId", eventId)
+                .query(Integer.class)
+                .single();
         String documentIndexStatus = jdbcClient.sql("SELECT index_status FROM documents WHERE id = :docId")
                 .param("docId", docId)
                 .query(String.class)
                 .single();
         assertThat(eventStatus).isEqualTo("PENDING");
+        assertThat(attemptCount).isZero();
         assertThat(documentIndexStatus).isEqualTo("PENDING");
 
         assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
@@ -444,6 +450,62 @@ class DocumentPublishControllerTest {
 
         assertThat(processedEvents).isEqualTo(1);
         assertThat(vectorRows).isPositive();
+    }
+
+    @Test
+    void retriesLatestFailedIndexEventWithoutClientRememberingEventId() throws Exception {
+        String kbId = createKnowledgeBase("Direct Retry KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+        FakeEmbeddingConfig.failNextEmbeddingRequests(1);
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"));
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        MvcResult listResult = mockMvc.perform(get("/api/kbs/{kbId}/documents", kbId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(docId))
+                .andExpect(jsonPath("$[0].indexStatus").value("FAILED"))
+                .andExpect(jsonPath("$[0].latestFailedIndexEventId").isNotEmpty())
+                .andReturn();
+
+        String failedEventId = objectMapper.readTree(listResult.getResponse().getContentAsString())
+                .path(0)
+                .path("latestFailedIndexEventId")
+                .asText();
+
+        mockMvc.perform(post("/api/documents/{docId}/index/retry", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.docId").value(docId))
+                .andExpect(jsonPath("$.eventId").value(failedEventId))
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
+                .andExpect(jsonPath("$.message").value("Latest failed index event requeued; indexing is pending."));
+
+        String eventStatus = jdbcClient.sql("SELECT status FROM document_publish_events WHERE id = :eventId")
+                .param("eventId", failedEventId)
+                .query(String.class)
+                .single();
+        assertThat(eventStatus).isEqualTo("PENDING");
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long vectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        assertThat(vectorRows).isPositive();
+    }
+
+    @Test
+    void rejectsDirectIndexRetryWhenDocumentHasNoFailedIndexEvent() throws Exception {
+        String kbId = createKnowledgeBase("No Failed Retry KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+
+        mockMvc.perform(post("/api/documents/{docId}/index/retry", docId))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Document has no FAILED index event to retry."));
     }
 
     @Test

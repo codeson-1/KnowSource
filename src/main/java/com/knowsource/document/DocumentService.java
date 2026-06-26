@@ -31,6 +31,15 @@ public class DocumentService {
 
     private static final int MAX_TITLE_LENGTH = 256;
     private static final Set<String> SUPPORTED_UPLOAD_EXTENSIONS = Set.of("txt", "md", "markdown", "pdf", "doc", "docx");
+    private static final String DOCUMENT_SELECT_COLUMNS = """
+            d.id, d.kb_id, d.title, d.status, d.index_status, d.oss_key, d.version, d.file_type,
+            d.created_by, d.published_at, d.vectors_synced_at, d.created_at,
+            latest_ingest.id AS latest_ingest_task_id,
+            latest_ingest.status AS latest_ingest_status,
+            COALESCE(parent_counts.parent_chunk_count, 0) AS parent_chunk_count,
+            COALESCE(child_counts.child_chunk_count, 0) AS child_chunk_count,
+            latest_failed_index.id AS latest_failed_index_event_id
+            """;
 
     private final JdbcClient jdbcClient;
     private final CurrentUserService currentUserService;
@@ -157,11 +166,35 @@ public class DocumentService {
         requireKbMember(kbId, userId);
 
         return jdbcClient.sql("""
-                SELECT id, kb_id, title, status, index_status, oss_key, version, file_type,
-                       created_by, published_at, vectors_synced_at, created_at
-                FROM documents
-                WHERE kb_id = :kbId
-                ORDER BY created_at DESC, id DESC
+                SELECT
+                """ + DOCUMENT_SELECT_COLUMNS + """
+                FROM documents d
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM ingest_tasks
+                    WHERE doc_id = d.id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_ingest ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS parent_chunk_count
+                    FROM chunk_parents
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) parent_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS child_chunk_count
+                    FROM chunk_children
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) child_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id
+                    FROM document_publish_events
+                    WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_failed_index ON TRUE
+                WHERE d.kb_id = :kbId
+                ORDER BY d.created_at DESC, d.id DESC
                 """)
                 .param("kbId", kbId)
                 .query(DocumentService::mapDocument)
@@ -172,10 +205,34 @@ public class DocumentService {
         long userId = currentUserService.currentUserId();
 
         return jdbcClient.sql("""
-                SELECT d.id, d.kb_id, d.title, d.status, d.index_status, d.oss_key, d.version, d.file_type,
-                       d.created_by, d.published_at, d.vectors_synced_at, d.created_at
+                SELECT
+                """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
                 JOIN kb_members member ON member.kb_id = d.kb_id
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM ingest_tasks
+                    WHERE doc_id = d.id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_ingest ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS parent_chunk_count
+                    FROM chunk_parents
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) parent_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS child_chunk_count
+                    FROM chunk_children
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) child_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id
+                    FROM document_publish_events
+                    WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_failed_index ON TRUE
                 WHERE d.id = :docId AND member.user_id = :userId
                 """)
                 .param("docId", docId)
@@ -204,31 +261,12 @@ public class DocumentService {
         DocumentResponse document = getDocument(docId);
         IngestTask task = latestIngestTask(docId);
 
-        long parentChunkCount = jdbcClient.sql("""
-                SELECT COUNT(*)
-                FROM chunk_parents
-                WHERE doc_id = :docId AND doc_version = :docVersion
-                """)
-                .param("docId", docId)
-                .param("docVersion", document.version())
-                .query(Long.class)
-                .single();
-        long childChunkCount = jdbcClient.sql("""
-                SELECT COUNT(*)
-                FROM chunk_children
-                WHERE doc_id = :docId AND doc_version = :docVersion
-                """)
-                .param("docId", docId)
-                .param("docVersion", document.version())
-                .query(Long.class)
-                .single();
-
         return new DocumentIngestResponse(
                 document,
                 task.id(),
                 task.status(),
-                Math.toIntExact(parentChunkCount),
-                Math.toIntExact(childChunkCount));
+                document.parentChunkCount(),
+                document.childChunkCount());
     }
 
     public DocumentIngestResponse retryLatestIngestTask(String docId) {
@@ -275,6 +313,24 @@ public class DocumentService {
                 "Index event requeued; indexing is pending.");
     }
 
+    public DocumentPublishResponse retryLatestFailedIndexEvent(String docId) {
+        CurrentUser user = currentUserService.currentUser();
+        DocumentResponse document = getDocumentForMember(docId, user.id());
+        requireKbWriteAccess(document.kbId(), user);
+        String eventId = document.latestFailedIndexEventId();
+        if (!StringUtils.hasText(eventId)) {
+            throw new IllegalArgumentException("Document has no FAILED index event to retry.");
+        }
+        documentIndexOutboxService.requeueFailedEvent(docId, eventId);
+        return new DocumentPublishResponse(
+                document.id(),
+                document.kbId(),
+                document.version(),
+                "PENDING",
+                eventId,
+                "Latest failed index event requeued; indexing is pending.");
+    }
+
     public DocumentPublishResponse archive(String docId) {
         CurrentUser user = currentUserService.currentUser();
         DocumentResponse document = getDocumentForMember(docId, user.id());
@@ -302,6 +358,48 @@ public class DocumentService {
                 "Document archived; vectors were removed.");
     }
 
+    public void deleteDocument(String docId) {
+        CurrentUser user = currentUserService.currentUser();
+        DocumentResponse document = getDocumentForMember(docId, user.id());
+        requireKbWriteAccess(document.kbId(), user);
+
+        transactionTemplate.executeWithoutResult(status -> {
+            vectorIndexService.deleteDocumentVectors(docId);
+            jdbcClient.sql("""
+                    DELETE FROM document_publish_events
+                    WHERE doc_id = :docId
+                    """)
+                    .param("docId", docId)
+                    .update();
+            jdbcClient.sql("""
+                    DELETE FROM chunk_children
+                    WHERE doc_id = :docId
+                    """)
+                    .param("docId", docId)
+                    .update();
+            jdbcClient.sql("""
+                    DELETE FROM chunk_parents
+                    WHERE doc_id = :docId
+                    """)
+                    .param("docId", docId)
+                    .update();
+            jdbcClient.sql("""
+                    DELETE FROM ingest_tasks
+                    WHERE doc_id = :docId
+                    """)
+                    .param("docId", docId)
+                    .update();
+            jdbcClient.sql("""
+                    DELETE FROM documents
+                    WHERE id = :docId
+                    """)
+                    .param("docId", docId)
+                    .update();
+        });
+
+        deleteSourceQuietly(document.ossKey());
+    }
+
     public DocumentPreviewResponse preview(String docId, Integer pageNumber) {
         long userId = currentUserService.currentUserId();
         DocumentResponse document = getDocumentForMember(docId, userId);
@@ -318,10 +416,34 @@ public class DocumentService {
     public InputStream openSourcePreview(String sourceKey) throws IOException {
         long userId = currentUserService.currentUserId();
         DocumentResponse document = jdbcClient.sql("""
-                SELECT d.id, d.kb_id, d.title, d.status, d.index_status, d.oss_key, d.version, d.file_type,
-                       d.created_by, d.published_at, d.vectors_synced_at, d.created_at
+                SELECT
+                """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
                 JOIN kb_members member ON member.kb_id = d.kb_id
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM ingest_tasks
+                    WHERE doc_id = d.id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_ingest ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS parent_chunk_count
+                    FROM chunk_parents
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) parent_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS child_chunk_count
+                    FROM chunk_children
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) child_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id
+                    FROM document_publish_events
+                    WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_failed_index ON TRUE
                 WHERE d.oss_key = :sourceKey AND member.user_id = :userId
                 """)
                 .param("sourceKey", sourceKey)
@@ -389,7 +511,12 @@ public class DocumentService {
                     INSERT INTO documents (id, kb_id, title, status, index_status, oss_key, version, file_type, created_by)
                     VALUES (:id, :kbId, :title, 'DRAFT', 'NONE', :ossKey, 1, :fileType, :createdBy)
                     RETURNING id, kb_id, title, status, index_status, oss_key, version, file_type,
-                              created_by, published_at, vectors_synced_at, created_at
+                              created_by, published_at, vectors_synced_at, created_at,
+                              NULL AS latest_ingest_task_id,
+                              NULL AS latest_ingest_status,
+                              0 AS parent_chunk_count,
+                              0 AS child_chunk_count,
+                              NULL AS latest_failed_index_event_id
                     """)
                     .param("id", docId)
                     .param("kbId", kbId)
@@ -435,7 +562,12 @@ public class DocumentService {
                         vectors_synced_at = NULL
                     WHERE id = :id
                     RETURNING id, kb_id, title, status, index_status, oss_key, version, file_type,
-                              created_by, published_at, vectors_synced_at, created_at
+                              created_by, published_at, vectors_synced_at, created_at,
+                              NULL AS latest_ingest_task_id,
+                              NULL AS latest_ingest_status,
+                              0 AS parent_chunk_count,
+                              0 AS child_chunk_count,
+                              NULL AS latest_failed_index_event_id
                     """)
                     .param("id", existing.id())
                     .param("title", title)
@@ -687,6 +819,18 @@ public class DocumentService {
         }
     }
 
+    private void deleteSourceQuietly(String sourceKey) {
+        if (!StringUtils.hasText(sourceKey)
+                || (!sourceKey.startsWith("local://") && !sourceKey.startsWith("oss://"))) {
+            return;
+        }
+        try {
+            sourceStorageService.delete(sourceKey);
+        } catch (IOException ignored) {
+            // The database row is the source of truth for deletion; source cleanup can be retried operationally.
+        }
+    }
+
     private String fileExtension(String originalFilename) {
         if (!StringUtils.hasText(originalFilename)) {
             throw new IllegalArgumentException("Document filename is required.");
@@ -755,10 +899,34 @@ public class DocumentService {
 
     private DocumentResponse getDocumentForMember(String docId, long userId) {
         return jdbcClient.sql("""
-                SELECT d.id, d.kb_id, d.title, d.status, d.index_status, d.oss_key, d.version, d.file_type,
-                       d.created_by, d.published_at, d.vectors_synced_at, d.created_at
+                SELECT
+                """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
                 JOIN kb_members member ON member.kb_id = d.kb_id
+                LEFT JOIN LATERAL (
+                    SELECT id, status
+                    FROM ingest_tasks
+                    WHERE doc_id = d.id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_ingest ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS parent_chunk_count
+                    FROM chunk_parents
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) parent_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS child_chunk_count
+                    FROM chunk_children
+                    WHERE doc_id = d.id AND doc_version = d.version
+                ) child_counts ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT id
+                    FROM document_publish_events
+                    WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                ) latest_failed_index ON TRUE
                 WHERE d.id = :docId AND member.user_id = :userId
                 """)
                 .param("docId", docId)
@@ -842,7 +1010,12 @@ public class DocumentService {
                 rs.getLong("created_by"),
                 toLocalDateTime(rs.getTimestamp("published_at")),
                 toLocalDateTime(rs.getTimestamp("vectors_synced_at")),
-                rs.getTimestamp("created_at").toLocalDateTime());
+                rs.getTimestamp("created_at").toLocalDateTime(),
+                rs.getString("latest_ingest_task_id"),
+                rs.getString("latest_ingest_status"),
+                rs.getInt("parent_chunk_count"),
+                rs.getInt("child_chunk_count"),
+                rs.getString("latest_failed_index_event_id"));
     }
 
     private static DocumentChunkResponse mapChunk(ResultSet rs, int rowNum) throws SQLException {

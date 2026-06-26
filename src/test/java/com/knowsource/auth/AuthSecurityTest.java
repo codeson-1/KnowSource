@@ -180,6 +180,41 @@ class AuthSecurityTest {
     }
 
     @Test
+    void roleChangeInvalidatesExistingAccessToken() throws Exception {
+        String adminToken = login("demo", "demo");
+        long viewerId = createUser("viewer", "VIEWER");
+        String viewerToken = login("viewer", "viewer");
+        String kbId = createKnowledgeBase(adminToken, "Token Version KB");
+        jdbcClient.sql("""
+                INSERT INTO kb_members (kb_id, user_id, role)
+                VALUES (:kbId, :userId, 'VIEWER')
+                """)
+                .param("kbId", kbId)
+                .param("userId", viewerId)
+                .update();
+
+        mockMvc.perform(get("/api/kbs")
+                        .header("Authorization", "Bearer " + viewerToken))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(put("/api/auth/users/{userId}/role", viewerId)
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"globalRole\":\"EDITOR\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.globalRole").value("EDITOR"));
+
+        mockMvc.perform(get("/api/kbs")
+                        .header("Authorization", "Bearer " + viewerToken))
+                .andExpect(status().isUnauthorized());
+
+        String refreshedViewerToken = login("viewer", "viewer");
+        mockMvc.perform(get("/api/kbs")
+                        .header("Authorization", "Bearer " + refreshedViewerToken))
+                .andExpect(status().isOk());
+    }
+
+    @Test
     void viewerCannotUseAdminUserApis() throws Exception {
         mockMvc.perform(post("/api/auth/register")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -195,7 +230,9 @@ class AuthSecurityTest {
         mockMvc.perform(get("/api/auth/users")
                         .header("Authorization", "Bearer " + viewerToken))
                 .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.message").value("ADMIN access is required."));
+                .andExpect(jsonPath("$.code").value(40300))
+                .andExpect(jsonPath("$.message").value("ADMIN access is required."))
+                .andExpect(jsonPath("$.timestamp").isNotEmpty());
     }
 
     @Test

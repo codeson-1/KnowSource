@@ -101,7 +101,7 @@ class ChatControllerTest {
                 .andExpect(jsonPath("$.question").value("How many annual leave days are available?"))
                 .andExpect(jsonPath("$.ragProfile").value("naive"))
                 .andExpect(jsonPath("$.refused").value(false))
-                .andExpect(jsonPath("$.answer").value(startsWith("已检索到相关知识片段")))
+                .andExpect(jsonPath("$.answer").value(startsWith("Generated answer for:")))
                 .andExpect(jsonPath("$.sources", hasSize(1)))
                 .andExpect(jsonPath("$.sources[0].index").value(1))
                 .andExpect(jsonPath("$.sources[0].docId").value(leaveDocId))
@@ -119,10 +119,10 @@ class ChatControllerTest {
                 WHERE id = :traceId
                   AND kb_id = :kbId
                   AND query = 'How many annual leave days are available?'
-                  AND answer LIKE '已检索到相关知识片段%'
+                  AND answer LIKE 'Generated answer for:%'
                   AND rag_profile = 'naive'
                   AND retrieval_ms IS NOT NULL
-                  AND llm_ms = 0
+                  AND llm_ms IS NOT NULL
                   AND total_ms IS NOT NULL
                   AND jsonb_array_length(retrieved_chunks) = 1
                   AND retrieved_chunks -> 0 ->> 'docId' = :docId
@@ -522,7 +522,7 @@ class ChatControllerTest {
                 .andExpect(jsonPath("$.retrievedChunks", hasSize(1)))
                 .andExpect(jsonPath("$.retrievedChunks[0].docId").value(docId))
                 .andExpect(jsonPath("$.retrievalMs").isNumber())
-                .andExpect(jsonPath("$.llmMs").value(0))
+                .andExpect(jsonPath("$.llmMs").isNumber())
                 .andExpect(jsonPath("$.totalMs").isNumber())
                 .andExpect(jsonPath("$.tokenUsage").isMap())
                 .andExpect(jsonPath("$.ragProfile").value("naive"))
@@ -654,6 +654,64 @@ class ChatControllerTest {
     }
 
     @Test
+    void refusesChineseOutOfScopeQuestionWhenVectorSearchReturnsUnrelatedChunk() throws Exception {
+        String kbId = createKnowledgeBase("Chinese Refusal KB");
+        String docId = createDocument(kbId, "请假制度",
+                "年假规则：员工连续工作满一年后可享受年假。审批流程：员工需要至少提前3个工作日在系统提交请假申请。病假材料：病假超过2天需要上传医院诊断证明或就诊记录。");
+        publishDocument(docId);
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "公司股票代码是多少？"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refused").value(true))
+                .andExpect(jsonPath("$.sources", hasSize(0)));
+    }
+
+    @Test
+    void refusesChineseQuestionWhenOnlyWeakGenericTermsOverlap() throws Exception {
+        String kbId = createKnowledgeBase("Weak Evidence KB");
+        String docId = createDocument(kbId, "请假制度",
+                "请假制度说明：员工提交申请后，审批流程会记录在系统中。相关要求由部门负责人确认。");
+        publishDocument(docId);
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "报销审批流程是什么？"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refused").value(true))
+                .andExpect(jsonPath("$.sources", hasSize(0)));
+    }
+
+    @Test
+    void keepsChineseInScopeQuestionAnswerableAfterLexicalEvidenceGate() throws Exception {
+        String kbId = createKnowledgeBase("Chinese In Scope KB");
+        String docId = createDocument(kbId, "请假制度",
+                "年假规则：员工连续工作满一年后可享受年假。审批流程：员工需要至少提前3个工作日在系统提交请假申请。病假材料：病假超过2天需要上传医院诊断证明或就诊记录。");
+        publishDocument(docId);
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "年假有多少天？"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refused").value(false))
+                .andExpect(jsonPath("$.sources", hasSize(1)))
+                .andExpect(jsonPath("$.sources[0].docId").value(docId));
+    }
+
+    @Test
     void rejectsBlankQuestion() throws Exception {
         String kbId = createKnowledgeBase("Validation KB");
 
@@ -663,9 +721,11 @@ class ChatControllerTest {
                                 {
                                   "question": "   "
                                 }
-                                """))
+                """))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").value("Question is required."));
+                .andExpect(jsonPath("$.code").value(40001))
+                .andExpect(jsonPath("$.message").value("Question is required."))
+                .andExpect(jsonPath("$.timestamp").isNotEmpty());
     }
 
     @Test
@@ -835,6 +895,16 @@ class ChatControllerTest {
                     throw new AiProviderException("AI chat call failed.", new IllegalStateException("synthetic"));
                 }
                 tokenConsumer.accept("streamed answer");
+            };
+        }
+
+        @Bean
+        AnswerGenerator answerGenerator() {
+            return (question, sources) -> {
+                if (FAIL_CHAT_GENERATION.getAndSet(false)) {
+                    throw new AiProviderException("AI chat call failed.", new IllegalStateException("synthetic"));
+                }
+                return "Generated answer for: " + question;
             };
         }
 

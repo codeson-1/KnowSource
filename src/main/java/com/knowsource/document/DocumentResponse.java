@@ -14,5 +14,10 @@ public record DocumentResponse(
         long createdBy,
         LocalDateTime publishedAt,
         LocalDateTime vectorsSyncedAt,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        String latestIngestTaskId,
+        String latestIngestStatus,
+        int parentChunkCount,
+        int childChunkCount,
+        String latestFailedIndexEventId) {
 }

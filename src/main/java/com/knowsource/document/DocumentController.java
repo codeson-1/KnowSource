@@ -2,14 +2,10 @@ package com.knowsource.document;
 
 import java.net.URI;
 import java.util.List;
-import java.util.Map;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -97,6 +93,12 @@ public class DocumentController {
         return ResponseEntity.accepted().body(documentService.archive(docId));
     }
 
+    @DeleteMapping("/documents/{docId}")
+    public ResponseEntity<Void> deleteDocument(@PathVariable String docId) {
+        documentService.deleteDocument(docId);
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/documents/{docId}/preview")
     public DocumentPreviewResponse preview(
             @PathVariable String docId,
@@ -117,23 +119,8 @@ public class DocumentController {
         return ResponseEntity.accepted().body(documentService.requeueIndexEvent(docId, eventId));
     }
 
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, String>> handleBadRequest(IllegalArgumentException ex) {
-        return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
-    }
-
-    @ExceptionHandler(ResourceNotFoundException.class)
-    public ResponseEntity<Map<String, String>> handleNotFound(ResourceNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", ex.getMessage()));
-    }
-
-    @ExceptionHandler(AccessDeniedException.class)
-    public ResponseEntity<Map<String, String>> handleForbidden(AccessDeniedException ex) {
-        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", ex.getMessage()));
-    }
-
-    @ExceptionHandler(java.io.IOException.class)
-    public ResponseEntity<Map<String, String>> handleSourceReadFailure(java.io.IOException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", "Document source not found."));
+    @PostMapping("/documents/{docId}/index/retry")
+    public ResponseEntity<DocumentPublishResponse> retryLatestFailedIndexEvent(@PathVariable String docId) {
+        return ResponseEntity.accepted().body(documentService.retryLatestFailedIndexEvent(docId));
     }
 }

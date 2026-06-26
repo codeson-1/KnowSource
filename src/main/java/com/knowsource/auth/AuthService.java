@@ -51,7 +51,7 @@ public class AuthService {
         String username = normalize(request.username(), "Username is required.");
         String password = normalize(request.password(), "Password is required.");
         AuthUser user = jdbcClient.sql("""
-                SELECT id, username, password_hash, global_role
+                SELECT id, username, password_hash, global_role, token_version
                 FROM users
                 WHERE username = :username
                 """)
@@ -80,7 +80,7 @@ public class AuthService {
             AuthUser user = jdbcClient.sql("""
                     INSERT INTO users (username, password_hash, email, global_role)
                     VALUES (:username, :passwordHash, :email, 'VIEWER')
-                    RETURNING id, username, password_hash, global_role
+                    RETURNING id, username, password_hash, global_role, token_version
                     """)
                     .param("username", username)
                     .param("passwordHash", passwordEncoder.encode(password))
@@ -96,7 +96,7 @@ public class AuthService {
         String tokenHash = hash(refreshToken);
         return transactionTemplate.execute(status -> {
             CurrentUser user = jdbcClient.sql("""
-                    SELECT u.id, u.username, u.global_role
+                    SELECT u.id, u.username, u.global_role, u.token_version
                     FROM refresh_tokens rt
                     JOIN users u ON u.id = rt.user_id
                     WHERE rt.token_hash = :tokenHash
@@ -108,7 +108,8 @@ public class AuthService {
                     .query((rs, rowNum) -> new CurrentUser(
                             rs.getLong("id"),
                             rs.getString("username"),
-                            rs.getString("global_role")))
+                            rs.getString("global_role"),
+                            rs.getInt("token_version")))
                     .optional()
                     .orElseThrow(() -> new BadCredentialsException("Invalid refresh token."));
 
@@ -266,7 +267,8 @@ public class AuthService {
                 rs.getLong("id"),
                 rs.getString("username"),
                 rs.getString("password_hash"),
-                rs.getString("global_role"));
+                rs.getString("global_role"),
+                rs.getInt("token_version"));
     }
 
     private static UserResponse mapUserResponse(ResultSet rs, int rowNum) throws SQLException {
@@ -278,10 +280,10 @@ public class AuthService {
                 rs.getTimestamp("created_at").toLocalDateTime());
     }
 
-    private record AuthUser(long id, String username, String passwordHash, String globalRole) {
+    private record AuthUser(long id, String username, String passwordHash, String globalRole, int tokenVersion) {
 
         CurrentUser currentUser() {
-            return new CurrentUser(id, username, globalRole);
+            return new CurrentUser(id, username, globalRole, tokenVersion);
         }
     }
 }

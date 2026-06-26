@@ -37,7 +37,7 @@ public class CurrentUserService {
 
     public CurrentUser findByUsername(String username) {
         return jdbcClient.sql("""
-                SELECT id, username, global_role
+                SELECT id, username, global_role, token_version
                 FROM users
                 WHERE username = :username
                 """)
@@ -51,6 +51,7 @@ public class CurrentUserService {
         return new CurrentUser(
                 rs.getLong("id"),
                 rs.getString("username"),
-                rs.getString("global_role"));
+                rs.getString("global_role"),
+                rs.getInt("token_version"));
     }
 }

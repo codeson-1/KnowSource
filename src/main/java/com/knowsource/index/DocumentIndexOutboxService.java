@@ -6,12 +6,16 @@ import java.util.Optional;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 @Service
 public class DocumentIndexOutboxService {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentIndexOutboxService.class);
 
     private final JdbcClient jdbcClient;
     private final VectorIndexService vectorIndexService;
@@ -81,6 +85,7 @@ public class DocumentIndexOutboxService {
                     UPDATE document_publish_events
                     SET status = 'PENDING',
                         error_message = NULL,
+                        attempt_count = 0,
                         next_retry_at = NULL,
                         locked_at = NULL,
                         locked_by = NULL,
@@ -199,6 +204,8 @@ public class DocumentIndexOutboxService {
     }
 
     private void markFailed(IndexEvent event, RuntimeException ex) {
+        log.warn("Document index event failed. eventId={}, docId={}, docVersion={}",
+                event.id(), event.docId(), event.docVersion(), ex);
         transactionTemplate.executeWithoutResult(status -> {
             int currentAttemptCount = jdbcClient.sql("""
                     SELECT attempt_count
@@ -265,8 +272,28 @@ public class DocumentIndexOutboxService {
     }
 
     private static String failureMessage(RuntimeException ex) {
-        if (StringUtils.hasText(ex.getMessage())) {
-            return ex.getMessage();
+        // 遍历完整 cause 链而非只取 root cause:中间层(如 AiProviderException)的消息
+        // 往往是"AI embedding call failed."这类无信息文本,真正的根因在更内层。
+        // 旧实现只拼 root cause,当 root cause 消息为空时整条根因都会丢失。
+        StringBuilder builder = new StringBuilder();
+        Throwable current = ex;
+        while (current != null) {
+            if (StringUtils.hasText(current.getMessage())) {
+                if (!builder.isEmpty()) {
+                    builder.append(" -> ");
+                }
+                builder.append(current.getClass().getSimpleName())
+                        .append(": ")
+                        .append(current.getMessage());
+            }
+            Throwable cause = current.getCause();
+            if (cause == null || cause == current) {
+                break;
+            }
+            current = cause;
+        }
+        if (!builder.isEmpty()) {
+            return builder.toString();
         }
         return ex.getClass().getSimpleName();
     }

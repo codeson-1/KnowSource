@@ -38,7 +38,9 @@ public class KnowledgeBaseService {
     public KnowledgeBaseResponse create(CreateKnowledgeBaseRequest request) {
         String name = normalizeName(request.name());
         String description = normalizeDescription(request.description());
-        long ownerId = currentUserService.currentUserId();
+        CurrentUser user = currentUserService.currentUser();
+        requireKnowledgeBaseCreateAccess(user);
+        long ownerId = user.id();
         String kbId = UUID.randomUUID().toString();
 
         KnowledgeBaseResponse response = jdbcClient.sql("""
@@ -50,7 +52,7 @@ public class KnowledgeBaseService {
                 .param("name", name)
                 .param("description", description)
                 .param("ownerId", ownerId)
-                .query(KnowledgeBaseService::mapKnowledgeBase)
+                .query((rs, rowNum) -> mapKnowledgeBase(rs, rowNum, "OWNER"))
                 .single();
 
         jdbcClient.sql("""
@@ -68,7 +70,7 @@ public class KnowledgeBaseService {
         long userId = currentUserService.currentUserId();
 
         return jdbcClient.sql("""
-                SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at
+                SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
                 FROM knowledge_bases kb
                 JOIN kb_members member ON member.kb_id = kb.id
                 WHERE member.user_id = :userId
@@ -91,13 +93,17 @@ public class KnowledgeBaseService {
         String name = normalizeName(request.name());
         String description = normalizeDescription(request.description());
         return jdbcClient.sql("""
-                UPDATE knowledge_bases
+                UPDATE knowledge_bases kb
                 SET name = :name,
                     description = :description
-                WHERE id = :kbId
-                RETURNING id, name, description, owner_id, created_at
+                FROM kb_members member
+                WHERE kb.id = :kbId
+                  AND member.kb_id = kb.id
+                  AND member.user_id = :userId
+                RETURNING kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
                 """)
                 .param("kbId", kbId)
+                .param("userId", user.id())
                 .param("name", name)
                 .param("description", description)
                 .query(KnowledgeBaseService::mapKnowledgeBase)
@@ -246,12 +252,15 @@ public class KnowledgeBaseService {
     }
 
     private KnowledgeBaseResponse findKnowledgeBase(String kbId) {
+        long userId = currentUserService.currentUserId();
         return jdbcClient.sql("""
-                SELECT id, name, description, owner_id, created_at
-                FROM knowledge_bases
-                WHERE id = :kbId
+                SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
+                FROM knowledge_bases kb
+                JOIN kb_members member ON member.kb_id = kb.id
+                WHERE kb.id = :kbId AND member.user_id = :userId
                 """)
                 .param("kbId", kbId)
+                .param("userId", userId)
                 .query(KnowledgeBaseService::mapKnowledgeBase)
                 .optional()
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
@@ -285,6 +294,12 @@ public class KnowledgeBaseService {
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
         if (!"ADMIN".equals(user.globalRole()) && !"OWNER".equals(role)) {
             throw new AccessDeniedException("Knowledge base owner access is required.");
+        }
+    }
+
+    private void requireKnowledgeBaseCreateAccess(CurrentUser user) {
+        if (!Set.of("ADMIN", "EDITOR").contains(user.globalRole())) {
+            throw new AccessDeniedException("Knowledge base creation requires ADMIN or EDITOR access.");
         }
     }
 
@@ -378,12 +393,17 @@ public class KnowledgeBaseService {
     }
 
     private static KnowledgeBaseResponse mapKnowledgeBase(ResultSet rs, int rowNum) throws SQLException {
+        return mapKnowledgeBase(rs, rowNum, rs.getString("member_role"));
+    }
+
+    private static KnowledgeBaseResponse mapKnowledgeBase(ResultSet rs, int rowNum, String memberRole) throws SQLException {
         return new KnowledgeBaseResponse(
                 rs.getString("id"),
                 rs.getString("name"),
                 rs.getString("description"),
                 rs.getLong("owner_id"),
-                rs.getTimestamp("created_at").toLocalDateTime());
+                rs.getTimestamp("created_at").toLocalDateTime(),
+                memberRole);
     }
 
     private static KnowledgeBaseMemberResponse mapMember(ResultSet rs, int rowNum) throws SQLException {

@@ -39,6 +39,25 @@ public class ChatService {
             "\u77e5\u8bc6\u5e93\u4e2d\u672a\u627e\u5230\u76f8\u5173\u4fe1\u606f\u3002";
     private static final String AI_BUSY_ANSWER =
             "\u5df2\u68c0\u7d22\u5230\u76f8\u5173\u77e5\u8bc6\uff0c\u4f46 AI \u670d\u52a1\u6682\u65f6\u7e41\u5fd9\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+    private static final String GREETING_ANSWER =
+            "\u4f60\u597d\uff01\u8bf7\u95ee\u6709\u4ec0\u4e48\u53ef\u4ee5\u5e2e\u60a8\uff1f";
+    private static final String THANKS_ANSWER =
+            "\u4e0d\u5ba2\u6c14\uff0c\u6709\u9700\u8981\u53ef\u4ee5\u7ee7\u7eed\u95ee\u6211\u3002";
+    private static final String GOODBYE_ANSWER =
+            "\u597d\u7684\uff0c\u518d\u89c1\u3002";
+    private static final Set<String> GREETING_TERMS = Set.of(
+            "\u4f60\u597d", "\u60a8\u597d", "\u55e8", "\u54c8\u55bd", "\u54c8\u7f57",
+            "\u65e9", "\u65e9\u4e0a\u597d", "\u4e0b\u5348\u597d", "\u665a\u4e0a\u597d",
+            "\u5728\u5417", "hello", "hi", "hey");
+    private static final Set<String> THANKS_TERMS = Set.of(
+            "\u8c22\u8c22", "\u8c22\u4e86", "\u591a\u8c22", "\u611f\u8c22", "thanks", "thankyou", "thx");
+    private static final Set<String> GOODBYE_TERMS = Set.of(
+            "\u518d\u89c1", "\u62dc\u62dc", "\u56de\u5934\u89c1", "bye", "goodbye", "seeyou");
+    /**
+     * LLM 在判定上下文不足时，按 system prompt 回退的拒答文案。它与 {@link #EMPTY_CONTEXT_ANSWER}
+     * 一致，但出现在"检索阶段命中证据、生成阶段被模型拒答"的软拒答路径上。
+     */
+    static final String LLM_REFUSAL_ANSWER = EMPTY_CONTEXT_ANSWER;
 
     private final JdbcClient jdbcClient;
     private final CurrentUserService currentUserService;
@@ -81,7 +100,7 @@ public class ChatService {
         ChatContext context = prepareContext(kbId, request);
         if (context.refused()) {
             qaTraceService.recordAsync(traceRecord(context, context.fallbackAnswer(), 0, null));
-            chatSessionService.appendAssistantMessage(context.sessionId(), context.fallbackAnswer());
+            chatSessionService.appendAssistantMessage(context.sessionId(), context.fallbackAnswer(), context.traceId());
             return new ChatResponse(
                     context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
                     context.ragProfile().value(),
@@ -98,11 +117,12 @@ public class ChatService {
         String answer = generateAnswer(answerGenerator, context);
         int llmMs = elapsedMillis(llmStartedAt);
         qaTraceService.recordAsync(traceRecord(context, answer, llmMs, null));
-        chatSessionService.appendAssistantMessage(context.sessionId(), answer);
+        chatSessionService.appendAssistantMessage(context.sessionId(), answer, context.traceId());
+        boolean llmRefused = isLlmRefusal(answer);
         return new ChatResponse(
                 context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
                 context.ragProfile().value(),
-                answer, false, context.sources());
+                answer, llmRefused, llmRefused ? List.of() : context.sources());
     }
 
     public SseEmitter stream(String kbId, ChatRequest request) {
@@ -127,6 +147,16 @@ public class ChatService {
         String question = normalizeQuestion(request.question());
         ChatSessionHistory sessionHistory = chatSessionService.loadOrCreate(request.sessionId(), userId, kbId, question);
         RagProfile ragProfile = ragProfileRouter.route(request, sessionHistory.hasMessages());
+        String conversationalAnswer = conversationalAnswer(question);
+        if (conversationalAnswer != null) {
+            chatSessionService.appendUserMessage(sessionHistory.sessionId(), question);
+            String traceId = UUID.randomUUID().toString();
+            return new ChatContext(
+                    traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, question,
+                    null, 0, ragProfile, true, List.of(),
+                    conversationalAnswer,
+                    0);
+        }
         QueryRewriteResult rewriteResult = queryRewriteService.rewrite(question, sessionHistory.messages(), ragProfile);
         chatSessionService.appendUserMessage(sessionHistory.sessionId(), question);
 
@@ -186,13 +216,14 @@ public class ChatService {
                 recordFirstToken(context.kbId(), context.ragProfile(), firstTokenMs);
             }
             qaTraceService.recordAsync(traceRecord(context, answer.toString(), llmMs, firstTokenMs));
-            chatSessionService.appendAssistantMessage(context.sessionId(), answer.toString());
+            chatSessionService.appendAssistantMessage(context.sessionId(), answer.toString(), context.traceId());
+            boolean llmRefused = !context.refused() && isLlmRefusal(answer.toString());
             emitter.send(SseEmitter.event()
                     .name("done")
                     .data(new ChatStreamDone(
                                     context.traceId(), context.sessionId(), context.kbId(), context.question(),
                                     context.rewrittenQuery(), context.ragProfile().value(),
-                                    context.refused(), answer.toString()),
+                                    context.refused() || llmRefused, answer.toString()),
                             MediaType.APPLICATION_JSON));
             emitter.complete();
         } catch (RuntimeException | java.io.IOException ex) {
@@ -287,12 +318,53 @@ public class ChatService {
     }
 
     private static String draftAnswer(List<SourceCitation> sources) {
-        String citations = sources.stream()
-                .map(source -> "[" + source.index() + "]")
-                .collect(Collectors.joining(" "));
         return "\u5df2\u68c0\u7d22\u5230\u76f8\u5173\u77e5\u8bc6\u7247\u6bb5\uff0c"
                 + "\u4e0b\u4e00\u9636\u6bb5\u5c06\u63a5\u5165\u5927\u6a21\u578b\u751f\u6210\u6700\u7ec8\u56de\u7b54\u3002"
-                + "\u53c2\u8003\u6765\u6e90\uff1a" + citations;
+                + "\u53c2\u8003\u6765\u6e90\u8bf7\u67e5\u770b\u8bc1\u636e\u9762\u677f\u3002";
+    }
+
+    /**
+     * 识别 LLM 的软拒答：检索阶段命中了证据，但模型判定上下文不足、按 system prompt 回退了拒答文案。
+     * 这类回答必须按拒答处理并丢弃引用，否则会出现"一边说没找到信息、一边挂着来源"的矛盾。
+     */
+    private static boolean isLlmRefusal(String answer) {
+        return StringUtils.hasText(answer) && answer.trim().equals(LLM_REFUSAL_ANSWER);
+    }
+
+    private static String conversationalAnswer(String question) {
+        String compact = compactConversationalInput(question);
+        if (GREETING_TERMS.contains(compact)) {
+            return GREETING_ANSWER;
+        }
+        if (THANKS_TERMS.contains(compact)) {
+            return THANKS_ANSWER;
+        }
+        if (GOODBYE_TERMS.contains(compact)) {
+            return GOODBYE_ANSWER;
+        }
+        return null;
+    }
+
+    private static String compactConversationalInput(String question) {
+        StringBuilder compact = new StringBuilder();
+        question.toLowerCase(Locale.ROOT).codePoints()
+                .filter(codePoint -> !isIgnorableConversationalCodePoint(codePoint))
+                .forEach(compact::appendCodePoint);
+        return compact.toString();
+    }
+
+    private static boolean isIgnorableConversationalCodePoint(int codePoint) {
+        if (Character.isWhitespace(codePoint)) {
+            return true;
+        }
+        int type = Character.getType(codePoint);
+        return type == Character.CONNECTOR_PUNCTUATION
+                || type == Character.DASH_PUNCTUATION
+                || type == Character.START_PUNCTUATION
+                || type == Character.END_PUNCTUATION
+                || type == Character.INITIAL_QUOTE_PUNCTUATION
+                || type == Character.FINAL_QUOTE_PUNCTUATION
+                || type == Character.OTHER_PUNCTUATION;
     }
 
     private static boolean hasLexicalEvidence(List<String> queries, List<RetrievedChunk> chunks) {

@@ -7,11 +7,14 @@ import { Delete, Edit, Plus, Refresh } from '@element-plus/icons-vue'
 import { createKb, deleteKb, listKbs, updateKb } from '@/api/kbs'
 import { extractErrorMessage } from '@/api/http'
 import ConsoleLayout from '@/layouts/ConsoleLayout.vue'
+import { useAuthStore } from '@/stores/auth'
 import type { KnowledgeBaseResponse } from '@/types/api'
 
 const router = useRouter()
+const auth = useAuthStore()
 const loading = ref(false)
 const creating = ref(false)
+const createDialogVisible = ref(false)
 const saving = ref(false)
 const editDialogVisible = ref(false)
 const editingKb = ref<KnowledgeBaseResponse | null>(null)
@@ -24,6 +27,16 @@ const editForm = reactive({
   name: '',
   description: '',
 })
+
+function resetCreateForm() {
+  form.name = ''
+  form.description = ''
+}
+
+function openCreateDialog() {
+  resetCreateForm()
+  createDialogVisible.value = true
+}
 
 async function load() {
   loading.value = true
@@ -45,6 +58,8 @@ async function submit() {
   try {
     const kb = await createKb({ name: form.name.trim(), description: form.description.trim() })
     ElMessage.success('知识库已创建')
+    createDialogVisible.value = false
+    resetCreateForm()
     await router.push(`/kbs/${kb.id}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error))
@@ -83,7 +98,7 @@ async function saveEdit() {
 
 async function remove(kb: KnowledgeBaseResponse) {
   try {
-    await ElMessageBox.confirm(`删除知识库 ${kb.name} 会移除其成员、文档、索引和 QaTrace。确定继续吗？`, '确认删除知识库', {
+    await ElMessageBox.confirm(`删除知识库 ${kb.name} 会移除其成员、文档、索引和问答追踪记录。确定继续吗？`, '确认删除知识库', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -102,59 +117,91 @@ function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleString() : '-'
 }
 
+function canManageKb(kb: KnowledgeBaseResponse) {
+  return auth.globalRole === 'ADMIN' || kb.memberRole === 'OWNER'
+}
+
+function roleTone(role: KnowledgeBaseResponse['memberRole']) {
+  if (role === 'OWNER') {
+    return 'success'
+  }
+  if (role === 'EDITOR') {
+    return 'warning'
+  }
+  return ''
+}
+
 onMounted(load)
 </script>
 
 <template>
   <ConsoleLayout>
-    <div class="workspace-layout">
-      <section class="sidebar">
-        <div class="section-heading">
-          <div>
-            <h2>创建知识库</h2>
-            <p>Demo 通常从一个 HR 制度库开始。</p>
-          </div>
-        </div>
-        <el-form label-position="top" @submit.prevent="submit">
-          <el-form-item label="名称">
-            <el-input v-model="form.name" placeholder="例如：HR 制度库" />
-          </el-form-item>
-          <el-form-item label="描述">
-            <el-input v-model="form.description" type="textarea" :rows="4" placeholder="收录范围、部门或演示说明" />
-          </el-form-item>
-          <el-button type="primary" :loading="creating" :icon="Plus" native-type="submit" style="width: 100%">创建</el-button>
-        </el-form>
-      </section>
-
+    <div class="workspace-layout workspace-layout--single">
       <section class="content">
         <div class="kb-hero">
           <div>
             <h2>知识库列表</h2>
-            <p>选择一个知识库进入工作台，继续完成上传、发布、问答和 QaTrace 复盘。</p>
+            <p>选择一个知识库进入工作台，继续完成上传、发布、问答和问答追踪复盘。</p>
           </div>
-          <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+          <div class="toolbar-inline">
+            <el-button type="primary" :icon="Plus" :disabled="!auth.canWrite" @click="openCreateDialog">
+              创建知识库
+            </el-button>
+            <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+          </div>
         </div>
 
         <section class="panel">
+          <el-alert
+            v-if="!auth.canWrite"
+            title="全局 VIEWER 不能创建知识库；你仍可进入已授权知识库，具体操作由每个知识库的成员角色决定。"
+            type="info"
+            show-icon
+            :closable="false"
+            style="margin-bottom: 12px"
+          />
           <el-skeleton v-if="loading" :rows="5" animated />
           <el-empty v-else-if="!kbs.length" description="暂无可访问知识库" />
           <el-table v-else :data="kbs" stripe>
             <el-table-column prop="name" label="名称" min-width="180" />
             <el-table-column prop="description" label="描述" min-width="260" show-overflow-tooltip />
-            <el-table-column label="创建时间" width="190">
+            <el-table-column label="当前角色" width="130" align="center">
+              <template #default="{ row }">
+                <span class="status-tag" :class="roleTone(row.memberRole)">{{ row.memberRole }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="190" align="center">
               <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="210" fixed="right">
+            <el-table-column label="操作" width="220" fixed="right" align="center">
               <template #default="{ row }">
                 <el-button type="primary" link @click="router.push(`/kbs/${row.id}`)">进入</el-button>
-                <el-button type="primary" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
-                <el-button type="danger" link :icon="Delete" @click="remove(row)">删除</el-button>
+                <template v-if="canManageKb(row)">
+                  <el-button type="primary" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
+                  <el-button type="danger" link :icon="Delete" @click="remove(row)">删除</el-button>
+                </template>
+                <span v-else class="row-action-note">只读</span>
               </template>
             </el-table-column>
           </el-table>
         </section>
       </section>
     </div>
+
+    <el-dialog v-model="createDialogVisible" title="创建知识库" width="520px" destroy-on-close @closed="resetCreateForm">
+      <el-form label-position="top" @submit.prevent="submit">
+        <el-form-item label="名称">
+          <el-input v-model="form.name" placeholder="例如：HR 制度库" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="form.description" type="textarea" :rows="4" placeholder="收录范围、部门或演示说明" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="submit">创建</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="editDialogVisible" title="编辑知识库" width="520px" destroy-on-close>
       <el-form label-position="top" @submit.prevent="saveEdit">

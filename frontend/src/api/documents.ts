@@ -84,13 +84,17 @@ export async function getDocumentPreview(docId: string, pageNumber?: number | nu
   return data
 }
 
-export async function openSourcePreviewBlob(sourceKey: string) {
+export async function openSourcePreviewBlob(sourceKey: string, targetWindow?: Window | null) {
   const { data } = await http.get<Blob>('/documents/source-preview', {
     params: { sourceKey },
     responseType: 'blob',
   })
   const url = URL.createObjectURL(data)
-  window.open(url, '_blank', 'noopener,noreferrer')
+  if (targetWindow) {
+    targetWindow.location.href = url
+  } else {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
   return url
 }
 

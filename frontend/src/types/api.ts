@@ -27,6 +27,7 @@ export interface KnowledgeBaseResponse {
   description: string | null
   ownerId: number
   createdAt: string
+  memberRole: MemberRole
 }
 
 export interface KnowledgeBaseMemberResponse {
@@ -114,6 +115,35 @@ export interface ChatStreamDone {
   answer: string
 }
 
+export interface ChatSessionSummaryResponse {
+  id: string
+  kbId: string
+  title: string | null
+  messageCount: number
+  lastMessageRole: string | null
+  lastMessagePreview: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ChatSessionMessageResponse {
+  id: number
+  role: 'USER' | 'ASSISTANT'
+  content: string
+  qaTraceId: string | null
+  sources: SourceCitation[]
+  createdAt: string
+}
+
+export interface ChatSessionDetailResponse {
+  id: string
+  kbId: string
+  title: string | null
+  createdAt: string
+  updatedAt: string
+  messages: ChatSessionMessageResponse[]
+}
+
 export interface QaTraceSummaryResponse {
   id: string
   kbId: string
@@ -146,7 +176,7 @@ export interface QaTraceDetailResponse {
 
 export interface ChatRequest {
   question: string
-  topK: number
+  topK?: number
   profile: RagProfile
   sessionId?: string | null
 }

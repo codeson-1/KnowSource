@@ -1,15 +1,15 @@
-{"id":"leave_days","question":"How many annual leave days are available?","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["10 days","Approval"],"outOfScope":false}
-{"id":"leave_approval","question":"Who must approve annual leave?","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["manager approval"],"outOfScope":false}
-{"id":"security_badge","question":"What is required in the office for security?","expectedDocTitle":"Security Policy","expectedKeywords":["Security badges"],"outOfScope":false}
-{"id":"expense_deadline","question":"When should reimbursement receipts be submitted?","expectedDocTitle":"Expense Policy","expectedKeywords":["30 days"],"outOfScope":false}
-{"id":"remote_work","question":"How many remote work days are allowed each week?","expectedDocTitle":"Remote Work Policy","expectedKeywords":["2 days"],"outOfScope":false}
-{"id":"leave_table_carryover","question":"How many carryover leave days can move into the next year?","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["5"],"outOfScope":false}
-{"id":"expense_table_lodging","question":"What is the lodging reimbursement limit?","profile":"modular","expectedDocTitle":"Expense Policy","expectedKeywords":["800"],"outOfScope":false}
-{"id":"security_incident_cross_section","question":"Within how many hours should a lost badge be reported?","expectedDocTitle":"Security Policy","expectedKeywords":["24 hours"],"outOfScope":false}
-{"id":"followup_leave_approval","setupQuestion":"How many annual leave days are available?","question":"What is its approval process?","profile":"auto","expectedDocTitle":"Annual Leave Policy","expectedKeywords":["manager approval"],"outOfScope":false}
-{"id":"followup_remote_approval","setupQuestion":"How many remote work days are allowed each week?","question":"Who approves it?","profile":"auto","expectedDocTitle":"Remote Work Policy","expectedKeywords":["team lead approval"],"outOfScope":false}
-{"id":"modular_multiquery_expense","setupQuestion":"What is required in the office for security?","question":"When should reimbursement receipts be submitted?","profile":"auto","expectedDocTitle":"Expense Policy","expectedKeywords":["30 days"],"outOfScope":false}
-{"id":"followup_expense_lodging","setupQuestion":"When should reimbursement receipts be submitted?","question":"What is the lodging limit in the table?","profile":"auto","expectedDocTitle":"Expense Policy","expectedKeywords":["800"],"outOfScope":false}
-{"id":"stock_code","question":"What is the company's stock ticker?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
-{"id":"cafeteria_menu","question":"What is tomorrow's cafeteria menu?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
-{"id":"ocr_scan_contract","question":"What does the scanned contract stamp say?","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"leave_days","question":"全职员工每年有多少天年假？","expectedDocTitle":"年假制度","expectedKeywords":["10 天","审批"],"outOfScope":false}
+{"id":"leave_approval","question":"员工休年假需要谁审批？","expectedDocTitle":"年假制度","expectedKeywords":["直属经理审批"],"outOfScope":false}
+{"id":"security_badge","question":"进入办公区需要佩戴什么？","expectedDocTitle":"办公安全制度","expectedKeywords":["安全工牌"],"outOfScope":false}
+{"id":"expense_deadline","question":"报销票据需要在多少天内提交？","expectedDocTitle":"报销制度","expectedKeywords":["30 天"],"outOfScope":false}
+{"id":"remote_work","question":"员工每周可以远程办公几天？","expectedDocTitle":"远程办公制度","expectedKeywords":["2 天"],"outOfScope":false}
+{"id":"leave_table_carryover","question":"未使用的年假最多可以结转多少天到下一年？","expectedDocTitle":"年假制度","expectedKeywords":["5 天"],"outOfScope":false}
+{"id":"expense_table_lodging","question":"住宿报销额度是多少？","profile":"modular","expectedDocTitle":"报销制度","expectedKeywords":["800"],"outOfScope":false}
+{"id":"security_incident_cross_section","question":"安全工牌丢失后，需要在多少小时内上报？","expectedDocTitle":"办公安全制度","expectedKeywords":["24 小时"],"outOfScope":false}
+{"id":"followup_leave_approval","setupQuestion":"全职员工每年有多少天年假？","question":"它的审批流程是什么？","profile":"auto","expectedDocTitle":"年假制度","expectedKeywords":["直属经理审批"],"outOfScope":false}
+{"id":"followup_remote_approval","setupQuestion":"员工每周可以远程办公几天？","question":"谁来审批？","profile":"auto","expectedDocTitle":"远程办公制度","expectedKeywords":["团队负责人审批"],"outOfScope":false}
+{"id":"modular_multiquery_expense","setupQuestion":"进入办公区需要佩戴什么？","question":"报销票据需要在多少天内提交？","profile":"auto","expectedDocTitle":"报销制度","expectedKeywords":["30 天"],"outOfScope":false}
+{"id":"followup_expense_lodging","setupQuestion":"报销票据需要在多少天内提交？","question":"表格里的住宿额度是多少？","profile":"auto","expectedDocTitle":"报销制度","expectedKeywords":["800"],"outOfScope":false}
+{"id":"stock_code","question":"公司的股票代码是什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"cafeteria_menu","question":"明天食堂菜单是什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"ocr_scan_contract","question":"扫描合同上的印章写了什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}

@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -14,6 +15,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -218,6 +220,86 @@ class ChatControllerTest {
     }
 
     @Test
+    void listsAndRestoresChatSessionHistoryWithPerAnswerSources() throws Exception {
+        String kbId = createKnowledgeBase("Session History KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(not("")))
+                .andExpect(jsonPath("$.qaTraceId").value(not("")))
+                .andReturn();
+
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String sessionId = body.path("sessionId").asText();
+        String traceId = body.path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        mockMvc.perform(get("/api/kbs/{kbId}/chat/sessions?limit=10", kbId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(sessionId))
+                .andExpect(jsonPath("$[0].kbId").value(kbId))
+                .andExpect(jsonPath("$[0].title").value("How many annual leave days are available?"))
+                .andExpect(jsonPath("$[0].messageCount").value(2))
+                .andExpect(jsonPath("$[0].lastMessageRole").value("ASSISTANT"))
+                .andExpect(jsonPath("$[0].lastMessagePreview").value("Generated answer for: How many annual leave days are available?"))
+                .andExpect(jsonPath("$[0].updatedAt").isNotEmpty());
+
+        mockMvc.perform(get("/api/kbs/{kbId}/chat/sessions/{sessionId}", kbId, sessionId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(sessionId))
+                .andExpect(jsonPath("$.messages", hasSize(2)))
+                .andExpect(jsonPath("$.messages[0].role").value("USER"))
+                .andExpect(jsonPath("$.messages[0].content").value("How many annual leave days are available?"))
+                .andExpect(jsonPath("$.messages[0].sources", hasSize(0)))
+                .andExpect(jsonPath("$.messages[1].role").value("ASSISTANT"))
+                .andExpect(jsonPath("$.messages[1].qaTraceId").value(traceId))
+                .andExpect(jsonPath("$.messages[1].sources", hasSize(1)))
+                .andExpect(jsonPath("$.messages[1].sources[0].docId").value(docId))
+                .andExpect(jsonPath("$.messages[1].sources[0].snippet").value("Annual leave is 10 days. Approval is required."));
+    }
+
+    @Test
+    void deletesChatSessionMessagesButKeepsQaTraceAuditRows() throws Exception {
+        String kbId = createKnowledgeBase("Session Delete KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(docId);
+        MvcResult result = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode body = objectMapper.readTree(result.getResponse().getContentAsString());
+        String sessionId = body.path("sessionId").asText();
+        String traceId = body.path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        mockMvc.perform(delete("/api/kbs/{kbId}/chat/sessions/{sessionId}", kbId, sessionId))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/kbs/{kbId}/chat/sessions/{sessionId}", kbId, sessionId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.message").value("Chat session not found."));
+
+        Long traceCount = jdbcClient.sql("SELECT COUNT(*) FROM qa_traces WHERE id = :traceId")
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(traceCount).isEqualTo(1);
+    }
+
+    @Test
     void routesFollowUpWithSessionHistoryToModularAndStoresRewrittenQuery() throws Exception {
         String kbId = createKnowledgeBase("Multi Turn KB");
         String leaveDocId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
@@ -269,6 +351,62 @@ class ChatControllerTest {
                 .getResponse()
                 .getContentAsString());
         assertThat(trace.path("retrievedChunks").get(0).path("docId").asText()).isEqualTo(leaveDocId);
+    }
+
+    @Test
+    void greetingInExistingSessionDoesNotReusePreviousEvidence() throws Exception {
+        String kbId = createKnowledgeBase("Greeting KB");
+        String leaveDocId = createDocument(kbId, "Leave Policy", "Annual leave is 10 days. Approval is required.");
+        publishDocument(leaveDocId);
+
+        MvcResult first = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "How many annual leave days are available?",
+                                  "profile": "auto"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sources", hasSize(1)))
+                .andReturn();
+        String sessionId = objectMapper.readTree(first.getResponse().getContentAsString()).path("sessionId").asText();
+
+        MvcResult greeting = mockMvc.perform(post("/api/kbs/{kbId}/chat/stream", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM)
+                        .content("""
+                                {
+                                  "question": "\u4f60\u597d",
+                                  "profile": "auto",
+                                  "sessionId": "%s"
+                                }
+                                """.formatted(sessionId)))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        MvcResult dispatched = mockMvc.perform(asyncDispatch(greeting))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("event:sources")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("data:[]")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"refused\":true")))
+                .andReturn();
+
+        String sseBody = dispatched.getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(sseBody).contains("\u4f60\u597d\uff01\u8bf7\u95ee\u6709\u4ec0\u4e48\u53ef\u4ee5\u5e2e\u60a8\uff1f");
+
+        String traceId = extractTraceId(sseBody);
+        waitForTrace(traceId);
+        Long sourceCount = jdbcClient.sql("""
+                SELECT jsonb_array_length(retrieved_chunks)
+                FROM qa_traces
+                WHERE id = :traceId
+                """)
+                .param("traceId", traceId)
+                .query(Long.class)
+                .single();
+        assertThat(sourceCount).isZero();
     }
 
     @Test

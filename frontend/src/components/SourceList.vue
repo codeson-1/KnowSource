@@ -11,11 +11,16 @@ defineProps<{
 }>()
 
 async function openSource(source: SourceCitation) {
+  const targetWindow = window.open('', '_blank')
+  if (targetWindow) {
+    targetWindow.opener = null
+  }
   try {
     const preview = await getDocumentPreview(source.docId, source.pageNumber)
-    const url = await openSourcePreviewBlob(preview.sourceKey)
+    const url = await openSourcePreviewBlob(preview.sourceKey, targetWindow)
     revokeSourcePreviewUrl(url)
   } catch (error) {
+    targetWindow?.close()
     ElMessage.error(extractErrorMessage(error))
   }
 }

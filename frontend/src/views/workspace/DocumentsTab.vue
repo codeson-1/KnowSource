@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { DocumentAdd, Download, Refresh, UploadFilled } from '@element-plus/icons-vue'
+import {
+  CircleCheck,
+  DocumentAdd,
+  Download,
+  Refresh,
+  Search,
+  UploadFilled,
+  Warning,
+} from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 
 import {
@@ -38,6 +46,7 @@ const auth = useAuthStore()
 const loading = ref(false)
 const submitting = ref(false)
 const detailLoading = ref(false)
+const togglingDocIds = ref<Set<string>>(new Set())
 const documents = ref<DocumentResponse[]>([])
 const selectedDoc = ref<DocumentResponse | null>(null)
 const selectedTask = ref<DocumentIngestResponse | null>(null)
@@ -48,6 +57,17 @@ const uploadMode = ref<'file' | 'text'>('file')
 const uploadTarget = ref<DocumentResponse | null>(null)
 const preview = ref<DocumentPreviewResponse | null>(null)
 const pollTimer = ref<number | null>(null)
+const keyword = ref('')
+const statusFilter = ref('ALL')
+
+const statusFilterOptions = [
+  { label: '全部状态', value: 'ALL' },
+  { label: '草稿文档', value: 'DRAFT_DOC' },
+  { label: '已发布文档', value: 'PUBLISHED_DOC' },
+  { label: '索引已同步', value: 'INDEX_SYNCED' },
+  { label: '处理中', value: 'PROCESSING' },
+  { label: '异常文件', value: 'FAILED_DOC' },
+]
 
 const form = reactive({
   title: '',
@@ -59,19 +79,122 @@ const canWrite = computed(
   () => auth.canWrite || props.currentMemberRole === 'OWNER' || props.currentMemberRole === 'EDITOR',
 )
 const busyDocs = computed(() =>
-  documents.value.filter((doc) => ['PENDING', 'SYNCING'].includes(doc.indexStatus)),
+  documents.value.filter(
+    (doc) =>
+      ['PENDING', 'SYNCING'].includes(doc.indexStatus) ||
+      ['PENDING', 'PARSING'].includes(doc.latestIngestStatus || ''),
+  ),
 )
+const visibleDocuments = computed(() => {
+  const text = keyword.value.trim().toLowerCase()
+  return documents.value.filter((doc) => {
+    const matchesText =
+      !text ||
+      doc.title.toLowerCase().includes(text) ||
+      doc.id.toLowerCase().includes(text) ||
+      (doc.fileType || '').toLowerCase().includes(text)
+    const matchesStatus =
+      statusFilter.value === 'ALL' ||
+      (statusFilter.value === 'DRAFT_DOC' && doc.status === 'DRAFT') ||
+      (statusFilter.value === 'PUBLISHED_DOC' && doc.status === 'PUBLISHED') ||
+      (statusFilter.value === 'INDEX_SYNCED' && doc.indexStatus === 'SYNCED') ||
+      (statusFilter.value === 'PROCESSING' &&
+        (['PENDING', 'SYNCING'].includes(doc.indexStatus) ||
+          ['PENDING', 'PARSING'].includes(doc.latestIngestStatus || ''))) ||
+      (statusFilter.value === 'FAILED_DOC' &&
+        (doc.indexStatus === 'FAILED' || doc.latestIngestStatus === 'FAILED'))
+    return matchesText && matchesStatus
+  })
+})
+const searchableCount = computed(() => documents.value.filter(searchable).length)
+const failedDocumentCount = computed(
+  () => documents.value.filter((doc) => doc.indexStatus === 'FAILED' || doc.latestIngestStatus === 'FAILED').length,
+)
+const documentStats = computed(() => [
+  {
+    label: '可检索',
+    value: String(searchableCount.value),
+    hint: 'PUBLISHED + SYNCED，可直接参与问答',
+    tone: 'success',
+    icon: CircleCheck,
+  },
+  {
+    label: '异常文件',
+    value: String(failedDocumentCount.value),
+    hint: failedDocumentCount.value ? '需要重试入库或重试索引' : '当前没有失败文件',
+    tone: 'danger',
+    icon: Warning,
+  },
+])
 
 function searchable(doc: DocumentResponse) {
   return doc.status === 'PUBLISHED' && doc.indexStatus === 'SYNCED'
 }
 
 function canPublish(doc: DocumentResponse) {
-  return canWrite.value && doc.status !== 'PUBLISHED' && doc.indexStatus !== 'SYNCING'
+  return (
+    canWrite.value &&
+    doc.status !== 'PUBLISHED' &&
+    doc.indexStatus !== 'SYNCING' &&
+    doc.latestIngestStatus === 'READY'
+  )
 }
 
 function canArchive(doc: DocumentResponse) {
   return canWrite.value && doc.status === 'PUBLISHED'
+}
+
+function isDocumentEnabled(doc: DocumentResponse) {
+  return doc.status === 'PUBLISHED'
+}
+
+function canToggleEnabled(doc: DocumentResponse) {
+  if (!canWrite.value || doc.indexStatus === 'SYNCING' || ['PENDING', 'PARSING'].includes(doc.latestIngestStatus || '')) {
+    return false
+  }
+  return doc.status === 'PUBLISHED' || canPublish(doc)
+}
+
+function isToggling(doc: DocumentResponse) {
+  return togglingDocIds.value.has(doc.id)
+}
+
+async function toggleEnabled(doc: DocumentResponse, enabled: string | number | boolean) {
+  if (!canToggleEnabled(doc)) {
+    return
+  }
+  togglingDocIds.value = new Set(togglingDocIds.value).add(doc.id)
+  try {
+    if (enabled) {
+      if (!canPublish(doc)) {
+        ElMessage.warning('当前文档还不能发布。请确认入库完成且不在索引中。')
+        return
+      }
+      await publishDocument(doc.id)
+      ElMessage.success('已启用，正在发布索引')
+    } else {
+      if (!canArchive(doc)) {
+        ElMessage.warning('当前文档还未启用。')
+        return
+      }
+      await ElMessageBox.confirm('关闭启用会下架文档并删除向量，问答将不再检索它。确定继续吗？', '关闭启用', {
+        type: 'warning',
+        confirmButtonText: '关闭启用',
+        cancelButtonText: '取消',
+      })
+      await archiveDocument(doc.id)
+      ElMessage.success('已关闭启用')
+    }
+    await load()
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(extractErrorMessage(error))
+    }
+  } finally {
+    const next = new Set(togglingDocIds.value)
+    next.delete(doc.id)
+    togglingDocIds.value = next
+  }
 }
 
 function resetForm() {
@@ -187,33 +310,6 @@ async function openPreview(doc: DocumentResponse, pageNumber?: number | null) {
   }
 }
 
-async function publish(doc: DocumentResponse) {
-  try {
-    const result = await publishDocument(doc.id)
-    ElMessage.success(result.message || '已提交发布索引')
-    await load()
-  } catch (error) {
-    ElMessage.error(extractErrorMessage(error))
-  }
-}
-
-async function archive(doc: DocumentResponse) {
-  try {
-    await ElMessageBox.confirm('下架会删除该文档的向量，问答将不再检索它。确定继续吗？', '确认下架', {
-      type: 'warning',
-      confirmButtonText: '下架',
-      cancelButtonText: '取消',
-    })
-    await archiveDocument(doc.id)
-    ElMessage.success('文档已下架')
-    await load()
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error(extractErrorMessage(error))
-    }
-  }
-}
-
 async function remove(doc: DocumentResponse) {
   try {
     await ElMessageBox.confirm('删除会移除文档、切块、索引和源文件引用。确定继续吗？', '确认删除', {
@@ -284,21 +380,55 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="panel">
-    <div class="section-heading">
+  <div class="status-card-grid">
+    <article
+      v-for="stat in documentStats"
+      :key="stat.label"
+      class="status-card"
+      :class="`status-card--${stat.tone}`"
+    >
       <div>
-        <h3>文档列表</h3>
-        <p>
-          DRAFT 不会被问答检索；只有 PUBLISHED + SYNCED 才是可检索状态。
-          <span v-if="busyDocs.length">正在轮询 {{ busyDocs.length }} 个发布任务。</span>
-        </p>
+        <span>{{ stat.label }}</span>
+        <strong>{{ stat.value }}</strong>
+        <p>{{ stat.hint }}</p>
       </div>
-      <div class="toolbar-inline">
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <el-button type="primary" :icon="DocumentAdd" :disabled="!canWrite" @click="openUploadDialog()">上传文档</el-button>
+      <div class="status-card-icon">
+        <el-icon><component :is="stat.icon" /></el-icon>
+      </div>
+    </article>
+  </div>
+
+  <section class="filter-bar">
+    <div class="filter-group">
+      <label>
+        <span>搜索</span>
+        <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="按文件名、ID 或类型查找..." />
+      </label>
+      <label>
+        <span>状态</span>
+        <el-select v-model="statusFilter" style="width: 168px">
+          <el-option
+            v-for="option in statusFilterOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+      </label>
+    </div>
+    <div class="toolbar-inline">
+      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+      <el-button type="primary" :icon="DocumentAdd" :disabled="!canWrite" @click="openUploadDialog()">上传文档</el-button>
+    </div>
+  </section>
+
+  <section class="panel inventory-panel">
+    <div class="section-heading compact">
+      <div>
+        <span class="section-kicker">INVENTORY</span>
+        <h3>当前筛选命中 <small>共 {{ visibleDocuments.length }} 个文件</small></h3>
       </div>
     </div>
-
     <el-alert
       v-if="!canWrite"
       title="当前用户不是全局 ADMIN/EDITOR，也不是该知识库 OWNER/EDITOR，写操作入口已禁用。"
@@ -307,45 +437,53 @@ onBeforeUnmount(() => {
       style="margin-bottom: 12px"
     />
 
-    <el-table v-loading="loading" :data="documents" stripe>
+    <el-table v-loading="loading" :data="visibleDocuments" stripe>
       <template #empty>
-        <div class="empty-state">还没有文档。上传文本、Markdown、PDF 或 Word 后，等待 READY 再发布索引。</div>
+        <span />
       </template>
       <el-table-column prop="title" label="标题" min-width="230">
         <template #default="{ row }">
           <strong>{{ row.title }}</strong>
-          <div class="muted">{{ row.id }}</div>
         </template>
       </el-table-column>
-      <el-table-column prop="fileType" label="类型" width="100" />
-      <el-table-column label="文档状态" width="118">
+      <el-table-column prop="fileType" label="类型" width="100" align="center" />
+      <el-table-column label="文档状态" width="130" align="center">
         <template #default="{ row }"><StatusTag :value="row.status" /></template>
       </el-table-column>
-      <el-table-column label="索引状态" width="118">
+      <el-table-column label="索引状态" width="126" align="center">
         <template #default="{ row }"><StatusTag :value="row.indexStatus" /></template>
       </el-table-column>
-      <el-table-column label="入库状态" width="118">
+      <el-table-column label="入库状态" width="120" align="center">
         <template #default="{ row }"><StatusTag :value="row.latestIngestStatus" kind="ingest" /></template>
       </el-table-column>
-      <el-table-column label="切块" width="110">
+      <el-table-column label="切块" width="110" align="center">
         <template #default="{ row }">{{ row.parentChunkCount }} / {{ row.childChunkCount }}</template>
       </el-table-column>
-      <el-table-column label="检索可用" width="118">
+      <el-table-column label="检索可用" width="118" align="center">
         <template #default="{ row }"><StatusTag :value="searchable(row) ? '可检索' : '不可检索'" kind="available" /></template>
       </el-table-column>
-      <el-table-column prop="version" label="版本" width="76" />
-      <el-table-column label="发布时间" width="170">
+      <el-table-column label="启用" width="96" align="center">
+        <template #default="{ row }">
+          <el-switch
+            :model-value="isDocumentEnabled(row)"
+            :disabled="!canToggleEnabled(row)"
+            :loading="isToggling(row)"
+            aria-label="切换文档启用状态"
+            @change="toggleEnabled(row, $event)"
+          />
+        </template>
+      </el-table-column>
+      <el-table-column prop="version" label="版本" width="76" align="center" />
+      <el-table-column label="发布时间" width="170" align="center">
         <template #default="{ row }">{{ formatDate(row.publishedAt) }}</template>
       </el-table-column>
-      <el-table-column label="向量同步" width="170">
+      <el-table-column label="向量同步" width="170" align="center">
         <template #default="{ row }">{{ formatDate(row.vectorsSyncedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="370" fixed="right">
+      <el-table-column label="操作" width="300" fixed="right" align="center">
         <template #default="{ row }">
           <el-button link type="primary" @click="inspect(row)">详情</el-button>
-          <el-button link type="primary" :disabled="!canPublish(row)" @click="publish(row)">发布</el-button>
           <el-button link type="primary" :disabled="!canWrite" @click="openUploadDialog(row)">替换</el-button>
-          <el-button link type="warning" :disabled="!canArchive(row)" @click="archive(row)">下架</el-button>
           <el-button link type="warning" :disabled="!canWrite" @click="retryParse(row)">重试入库</el-button>
           <el-button link type="warning" :disabled="!canWrite || !row.latestFailedIndexEventId" @click="retryIndex(row)">重试索引</el-button>
           <el-button link type="danger" :disabled="!canWrite" @click="remove(row)">删除</el-button>
@@ -426,8 +564,6 @@ onBeforeUnmount(() => {
       </div>
 
       <el-descriptions :column="2" border style="margin-top: 14px">
-        <el-descriptions-item label="文档 ID">{{ selectedDoc.id }}</el-descriptions-item>
-        <el-descriptions-item label="知识库 ID">{{ selectedDoc.kbId }}</el-descriptions-item>
         <el-descriptions-item label="文件类型">{{ selectedDoc.fileType || '-' }}</el-descriptions-item>
         <el-descriptions-item label="版本">v{{ selectedDoc.version }}</el-descriptions-item>
         <el-descriptions-item label="创建人">{{ selectedDoc.createdBy }}</el-descriptions-item>

@@ -44,6 +44,7 @@ class EvalRunnerTest {
 
     private static final Path GOLDEN_SET = Path.of("docs/eval/golden-set.jsonl");
     private static final Path REPORT = Path.of("docs/eval/report.md");
+    private static final String EXPECTED_REFUSAL = "拒答";
 
     @org.springframework.beans.factory.annotation.Autowired
     private MockMvc mockMvc;
@@ -101,51 +102,51 @@ class EvalRunnerTest {
     }
 
     private void seedAndPublishDocuments(String kbId) throws Exception {
-        publishDocument(createDocument(kbId, "Annual Leave Policy",
+        publishDocument(createDocument(kbId, "年假制度",
                 """
-                        # Annual Leave Policy
+                        # 年假制度
 
-                        ## Entitlement
+                        ## 假期额度
 
-                        Annual leave is 10 days for full-time employees. Carryover is allowed for up to 5 unused days into the next calendar year.
+                        全职员工每年享有 10 天年假。未使用的年假最多可以结转 5 天到下一自然年。
 
-                        ## Approval Workflow
+                        ## 审批流程
 
-                        Annual leave requires manager approval before the planned absence. Requests longer than 5 consecutive days also require HR review.
+                        员工休年假前必须先获得直属经理审批。连续请假超过 5 天的年假申请，还需要 HR 复核。
                         """));
-        publishDocument(createDocument(kbId, "Security Policy",
+        publishDocument(createDocument(kbId, "办公安全制度",
                 """
-                        # Security Policy
+                        # 办公安全制度
 
-                        ## Office Access
+                        ## 办公区出入
 
-                        Security badges are required in the office. Visitors must register at reception and wear a visitor badge.
+                        员工进入办公区必须佩戴安全工牌。访客需要在前台登记，并佩戴访客工牌。
 
-                        ## Incident Reporting
+                        ## 事件上报
 
-                        A lost badge must be reported to security within 24 hours so the access card can be disabled.
+                        如果安全工牌丢失，员工必须在 24 小时内向安全部门上报，以便及时停用门禁卡。
                         """));
-        publishDocument(createDocument(kbId, "Expense Policy",
+        publishDocument(createDocument(kbId, "报销制度",
                 """
-                        # Expense Policy
+                        # 报销制度
 
-                        ## Submission Deadline
+                        ## 提交时限
 
-                        Reimbursement receipts should be submitted within 30 days through the finance portal.
+                        报销票据应在费用发生后 30 天内通过财务门户提交。
 
-                        ## Reimbursement Limits
+                        ## 报销额度
 
-                        | Category | Limit |
+                        | 类别 | 额度 |
                         | --- | --- |
-                        | Meal | 120 |
-                        | Lodging | 800 |
-                        | Local transport | 300 |
+                        | 餐费 | 120 |
+                        | 住宿 | 800 |
+                        | 市内交通 | 300 |
                         """));
-        publishDocument(createDocument(kbId, "Remote Work Policy",
+        publishDocument(createDocument(kbId, "远程办公制度",
                 """
-                        # Remote Work Policy
+                        # 远程办公制度
 
-                        Employees may work remotely 2 days each week after team lead approval. Remote work should not be used on mandatory on-site training days.
+                        员工获得团队负责人审批后，每周可以远程办公 2 天。强制线下培训日不得安排远程办公。
                         """));
     }
 
@@ -261,18 +262,18 @@ class EvalRunnerTest {
 
     private static String renderReport(EvalSummary summary, List<EvalCaseResult> results) {
         StringBuilder report = new StringBuilder();
-        report.append("# KnowSource Eval Report\n\n");
-        report.append("Generated at: ").append(LocalDateTime.now()).append("\n\n");
-        report.append("| Metric | Value |\n");
+        report.append("# KnowSource 评测报告\n\n");
+        report.append("生成时间: ").append(LocalDateTime.now()).append("\n\n");
+        report.append("| 指标 | 数值 |\n");
         report.append("|---|---:|\n");
-        report.append("| Total cases | ").append(summary.totalCases()).append(" |\n");
-        report.append("| In-scope cases | ").append(summary.inScopeCases()).append(" |\n");
-        report.append("| Out-of-scope cases | ").append(summary.outOfScopeCases()).append(" |\n");
+        report.append("| 用例总数 | ").append(summary.totalCases()).append(" |\n");
+        report.append("| 范围内用例 | ").append(summary.inScopeCases()).append(" |\n");
+        report.append("| 范围外用例 | ").append(summary.outOfScopeCases()).append(" |\n");
         report.append("| Recall@5 | ").append(formatPercent(summary.recallAt5())).append(" |\n");
-        report.append("| Citation hit rate | ").append(formatPercent(summary.citationHitRate())).append(" |\n");
-        report.append("| Refusal accuracy | ").append(formatPercent(summary.refusalAccuracy())).append(" |\n\n");
-        report.append("## Case Results\n\n");
-        report.append("| ID | Setup | Question | Expected | Refused | Source titles | Pass |\n");
+        report.append("| 引用命中率 | ").append(formatPercent(summary.citationHitRate())).append(" |\n");
+        report.append("| 拒答准确率 | ").append(formatPercent(summary.refusalAccuracy())).append(" |\n\n");
+        report.append("## 用例结果\n\n");
+        report.append("| 用例 ID | 前置问题 | 问题 | 期望 | 是否拒答 | 来源文档 | 是否通过 |\n");
         report.append("|---|---|---|---|---:|---|---:|\n");
         for (EvalCaseResult result : results) {
             report.append("| ")
@@ -280,9 +281,9 @@ class EvalRunnerTest {
                     .append(escape(result.setupQuestion())).append(" | ")
                     .append(escape(result.question())).append(" | ")
                     .append(result.expected()).append(" | ")
-                    .append(result.refused()).append(" | ")
+                    .append(result.refused() ? "是" : "否").append(" | ")
                     .append(escape(String.join(", ", result.sourceTitles()))).append(" | ")
-                    .append(result.passed() ? "yes" : "no")
+                    .append(result.passed() ? "是" : "否")
                     .append(" |\n");
         }
         return report.toString();
@@ -333,7 +334,7 @@ class EvalRunnerTest {
                     goldenCase.id(),
                     goldenCase.setupQuestion(),
                     goldenCase.question(),
-                    goldenCase.outOfScope() ? "REFUSAL" : goldenCase.expectedDocTitle(),
+                    goldenCase.outOfScope() ? EXPECTED_REFUSAL : goldenCase.expectedDocTitle(),
                     response.refused(),
                     sourceTitles,
                     citationHit,
@@ -351,11 +352,11 @@ class EvalRunnerTest {
             double refusalAccuracy) {
 
         static EvalSummary from(List<EvalCaseResult> results) {
-            int inScope = (int) results.stream().filter(result -> !"REFUSAL".equals(result.expected())).count();
+            int inScope = (int) results.stream().filter(result -> !EXPECTED_REFUSAL.equals(result.expected())).count();
             int outOfScope = results.size() - inScope;
             long citationHits = results.stream().filter(EvalCaseResult::citationHit).count();
             long refusalCorrect = results.stream()
-                    .filter(result -> "REFUSAL".equals(result.expected()))
+                    .filter(result -> EXPECTED_REFUSAL.equals(result.expected()))
                     .filter(EvalCaseResult::refusalCorrect)
                     .count();
             return new EvalSummary(
@@ -393,7 +394,7 @@ class EvalRunnerTest {
 
         @Bean
         AnswerGenerator answerGenerator() {
-            return (question, sources) -> "Eval answer for: " + question;
+            return (question, sources) -> "评测回答：" + question;
         }
 
         private static float[] embedding(String text) {
@@ -420,25 +421,33 @@ class EvalRunnerTest {
         private static Set<String> categories(String text) {
             String normalized = text.toLowerCase(Locale.ROOT);
             java.util.LinkedHashSet<String> categories = new java.util.LinkedHashSet<>();
-            if (containsAny(normalized, "leave", "annual", "approve", "approval", "manager")) {
+            if (containsAny(normalized,
+                    "leave", "annual", "approve", "approval", "manager",
+                    "年假", "假期", "休年假", "直属经理", "hr", "复核", "全职")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "carryover", "unused")) {
+            if (containsAny(normalized, "carryover", "unused", "结转", "未使用")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "security", "badge", "office", "visitor", "lost")) {
+            if (containsAny(normalized,
+                    "security", "badge", "office", "visitor", "lost",
+                    "安全", "工牌", "办公区", "访客", "前台", "丢失", "门禁")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "incident", "24 hours")) {
+            if (containsAny(normalized, "incident", "24 hours", "事件", "24 小时", "24小时", "上报")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "expense", "reimbursement", "receipt", "finance", "lodging")) {
+            if (containsAny(normalized,
+                    "expense", "reimbursement", "receipt", "finance", "lodging",
+                    "报销", "票据", "财务", "住宿", "额度", "餐费", "交通")) {
                 categories.add("expense");
             }
             if (containsAny(normalized, "limit", "800")) {
                 categories.add("expense");
             }
-            if (containsAny(normalized, "remote", "work", "week")) {
+            if (containsAny(normalized,
+                    "remote", "work", "week",
+                    "远程", "办公", "每周", "团队负责人", "线下培训")) {
                 categories.add("remote");
             }
             return categories;

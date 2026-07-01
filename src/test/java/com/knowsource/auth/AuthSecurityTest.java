@@ -236,6 +236,28 @@ class AuthSecurityTest {
     }
 
     @Test
+    void viewerCannotCreateKnowledgeBase() throws Exception {
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "username": "viewer",
+                                  "password": "viewer"
+                                }
+                                """))
+                .andExpect(status().isCreated());
+        String viewerToken = login("viewer", "viewer");
+
+        mockMvc.perform(post("/api/kbs")
+                        .header("Authorization", "Bearer " + viewerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Viewer KB\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(40300))
+                .andExpect(jsonPath("$.message").value("Knowledge base creation requires ADMIN or EDITOR access."));
+    }
+
+    @Test
     void viewerCanReadMemberKnowledgeBaseButCannotWrite() throws Exception {
         String adminToken = login("demo", "demo");
         String kbId = createKnowledgeBase(adminToken, "RBAC KB");

@@ -34,7 +34,7 @@ async function submit() {
     <section class="auth-copy">
       <p class="brand">KnowSource</p>
       <h1>企业知识库问答工作台</h1>
-      <p>围绕 3 分钟面试演示主链路组织：登录、知识库、文档入库、发布索引、流式问答、引用溯源和 QaTrace 复盘。</p>
+      <p>围绕 3 分钟面试演示主链路组织：登录、知识库、文档入库、发布索引、流式问答、引用溯源和问答追踪复盘。</p>
     </section>
 
     <section class="auth-panel">

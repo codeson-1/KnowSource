@@ -7,5 +7,6 @@ public record KnowledgeBaseResponse(
         String name,
         String description,
         long ownerId,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        String memberRole) {
 }

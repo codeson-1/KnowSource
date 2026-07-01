@@ -1,32 +1,32 @@
-# KnowSource Eval Report
+# KnowSource 评测报告
 
-Generated at: 2026-06-26T12:52:50.663161400
+生成时间: 2026-07-01T11:04:29.577169500
 
-| Metric | Value |
+| 指标 | 数值 |
 |---|---:|
-| Total cases | 15 |
-| In-scope cases | 12 |
-| Out-of-scope cases | 3 |
+| 用例总数 | 15 |
+| 范围内用例 | 12 |
+| 范围外用例 | 3 |
 | Recall@5 | 100.0% |
-| Citation hit rate | 100.0% |
-| Refusal accuracy | 100.0% |
+| 引用命中率 | 100.0% |
+| 拒答准确率 | 100.0% |
 
-## Case Results
+## 用例结果
 
-| ID | Setup | Question | Expected | Refused | Source titles | Pass |
+| 用例 ID | 前置问题 | 问题 | 期望 | 是否拒答 | 来源文档 | 是否通过 |
 |---|---|---|---|---:|---|---:|
-| leave_days |  | How many annual leave days are available? | Annual Leave Policy | false | Annual Leave Policy, Remote Work Policy | yes |
-| leave_approval |  | Who must approve annual leave? | Annual Leave Policy | false | Annual Leave Policy, Remote Work Policy | yes |
-| security_badge |  | What is required in the office for security? | Security Policy | false | Security Policy | yes |
-| expense_deadline |  | When should reimbursement receipts be submitted? | Expense Policy | false | Expense Policy | yes |
-| remote_work |  | How many remote work days are allowed each week? | Remote Work Policy | false | Remote Work Policy, Annual Leave Policy | yes |
-| leave_table_carryover |  | How many carryover leave days can move into the next year? | Annual Leave Policy | false | Annual Leave Policy, Remote Work Policy | yes |
-| expense_table_lodging |  | What is the lodging reimbursement limit? | Expense Policy | false | Expense Policy | yes |
-| security_incident_cross_section |  | Within how many hours should a lost badge be reported? | Security Policy | false | Security Policy | yes |
-| followup_leave_approval | How many annual leave days are available? | What is its approval process? | Annual Leave Policy | false | Annual Leave Policy, Remote Work Policy | yes |
-| followup_remote_approval | How many remote work days are allowed each week? | Who approves it? | Remote Work Policy | false | Annual Leave Policy, Remote Work Policy | yes |
-| modular_multiquery_expense | What is required in the office for security? | When should reimbursement receipts be submitted? | Expense Policy | false | Expense Policy, Security Policy | yes |
-| followup_expense_lodging | When should reimbursement receipts be submitted? | What is the lodging limit in the table? | Expense Policy | false | Expense Policy | yes |
-| stock_code |  | What is the company's stock ticker? | REFUSAL | true |  | yes |
-| cafeteria_menu |  | What is tomorrow's cafeteria menu? | REFUSAL | true |  | yes |
-| ocr_scan_contract |  | What does the scanned contract stamp say? | REFUSAL | true |  | yes |
+| leave_days |  | 全职员工每年有多少天年假？ | 年假制度 | 否 | 年假制度 | 是 |
+| leave_approval |  | 员工休年假需要谁审批？ | 年假制度 | 否 | 年假制度 | 是 |
+| security_badge |  | 进入办公区需要佩戴什么？ | 办公安全制度 | 否 | 办公安全制度, 远程办公制度 | 是 |
+| expense_deadline |  | 报销票据需要在多少天内提交？ | 报销制度 | 否 | 报销制度, 年假制度 | 是 |
+| remote_work |  | 员工每周可以远程办公几天？ | 远程办公制度 | 否 | 远程办公制度, 办公安全制度 | 是 |
+| leave_table_carryover |  | 未使用的年假最多可以结转多少天到下一年？ | 年假制度 | 否 | 年假制度 | 是 |
+| expense_table_lodging |  | 住宿报销额度是多少？ | 报销制度 | 否 | 报销制度, 年假制度 | 是 |
+| security_incident_cross_section |  | 安全工牌丢失后，需要在多少小时内上报？ | 办公安全制度 | 否 | 办公安全制度 | 是 |
+| followup_leave_approval | 全职员工每年有多少天年假？ | 它的审批流程是什么？ | 年假制度 | 否 | 年假制度 | 是 |
+| followup_remote_approval | 员工每周可以远程办公几天？ | 谁来审批？ | 远程办公制度 | 否 | 远程办公制度, 办公安全制度 | 是 |
+| modular_multiquery_expense | 进入办公区需要佩戴什么？ | 报销票据需要在多少天内提交？ | 报销制度 | 否 | 报销制度, 办公安全制度, 年假制度, 远程办公制度 | 是 |
+| followup_expense_lodging | 报销票据需要在多少天内提交？ | 表格里的住宿额度是多少？ | 报销制度 | 否 | 报销制度, 年假制度 | 是 |
+| stock_code |  | 公司的股票代码是什么？ | 拒答 | 是 |  | 是 |
+| cafeteria_menu |  | 明天食堂菜单是什么？ | 拒答 | 是 |  | 是 |
+| ocr_scan_contract |  | 扫描合同上的印章写了什么？ | 拒答 | 是 |  | 是 |

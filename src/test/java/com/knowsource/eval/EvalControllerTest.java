@@ -76,7 +76,7 @@ class EvalControllerTest {
 
         mockMvc.perform(get("/api/eval/golden-set/report"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.markdown").value(org.hamcrest.Matchers.containsString("KnowSource Eval Report")));
+                .andExpect(jsonPath("$.markdown").value(org.hamcrest.Matchers.containsString("KnowSource 评测报告")));
     }
 
     @TestConfiguration
@@ -104,7 +104,7 @@ class EvalControllerTest {
 
         @Bean
         AnswerGenerator answerGenerator() {
-            return (question, sources) -> "Eval answer for: " + question;
+            return (question, sources) -> "评测回答：" + question;
         }
 
         private static float[] embedding(String text) {
@@ -131,25 +131,33 @@ class EvalControllerTest {
         private static Set<String> categories(String text) {
             String normalized = text.toLowerCase(Locale.ROOT);
             java.util.LinkedHashSet<String> categories = new java.util.LinkedHashSet<>();
-            if (containsAny(normalized, "leave", "annual", "approve", "approval", "manager")) {
+            if (containsAny(normalized,
+                    "leave", "annual", "approve", "approval", "manager",
+                    "年假", "假期", "休年假", "直属经理", "hr", "复核", "全职")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "carryover", "unused")) {
+            if (containsAny(normalized, "carryover", "unused", "结转", "未使用")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "security", "badge", "office", "visitor", "lost")) {
+            if (containsAny(normalized,
+                    "security", "badge", "office", "visitor", "lost",
+                    "安全", "工牌", "办公区", "访客", "前台", "丢失", "门禁")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "incident", "24 hours")) {
+            if (containsAny(normalized, "incident", "24 hours", "事件", "24 小时", "24小时", "上报")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "expense", "reimbursement", "receipt", "finance", "lodging")) {
+            if (containsAny(normalized,
+                    "expense", "reimbursement", "receipt", "finance", "lodging",
+                    "报销", "票据", "财务", "住宿", "额度", "餐费", "交通")) {
                 categories.add("expense");
             }
             if (containsAny(normalized, "limit", "800")) {
                 categories.add("expense");
             }
-            if (containsAny(normalized, "remote", "work", "week")) {
+            if (containsAny(normalized,
+                    "remote", "work", "week",
+                    "远程", "办公", "每周", "团队负责人", "线下培训")) {
                 categories.add("remote");
             }
             return categories;

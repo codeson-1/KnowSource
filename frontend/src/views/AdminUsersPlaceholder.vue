@@ -104,7 +104,6 @@ onMounted(load)
             <el-table-column prop="username" label="用户名" min-width="180">
               <template #default="{ row }">
                 <strong>{{ row.username }}</strong>
-                <div class="muted">userId {{ row.id }}</div>
               </template>
             </el-table-column>
             <el-table-column prop="email" label="邮箱" min-width="220">

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { ArrowLeft } from '@element-plus/icons-vue'
 
 import { getKb, listMembers } from '@/api/kbs'
 import { extractErrorMessage } from '@/api/http'
@@ -15,12 +16,16 @@ import { useAuthStore } from '@/stores/auth'
 import type { KnowledgeBaseMemberResponse, KnowledgeBaseResponse, MemberRole } from '@/types/api'
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
+
 const kb = ref<KnowledgeBaseResponse | null>(null)
 const members = ref<KnowledgeBaseMemberResponse[]>([])
 const loading = ref(false)
-const activeTab = ref('documents')
+const allowedTabs = ['documents', 'chat', 'members', 'traces', 'evaluation']
+const activeTab = ref(allowedTabs.includes(String(route.query.tab)) ? String(route.query.tab) : 'documents')
 const traceRefreshKey = ref(0)
+
 const kbId = computed(() => String(route.params.kbId))
 const currentMemberRole = computed<MemberRole | null>(() => {
   const userId = auth.userId
@@ -48,44 +53,60 @@ function onChatTraced() {
 }
 
 watch(kbId, loadKb)
+watch(
+  () => route.query.tab,
+  (tab) => {
+    const next = String(tab || 'documents')
+    activeTab.value = allowedTabs.includes(next) ? next : 'documents'
+  },
+)
+watch(activeTab, (tab) => {
+  if (route.query.tab !== tab) {
+    void router.replace({ query: { ...route.query, tab } })
+  }
+})
 onMounted(loadKb)
 </script>
 
 <template>
   <ConsoleLayout>
-    <div class="workspace-layout">
-      <section class="content" style="grid-column: 1 / -1">
+    <div class="workspace-layout workspace-layout--single" :class="{ 'workspace-layout--chat': activeTab === 'chat' }">
+      <section class="content">
         <el-skeleton v-if="loading && !kb" :rows="5" animated />
         <template v-else-if="kb">
-          <div class="kb-hero">
+          <div v-if="activeTab !== 'chat'" class="kb-hero workspace-hero">
             <div>
+              <span class="section-kicker">KNOWLEDGE WORKSPACE</span>
               <h2>{{ kb.name }}</h2>
               <p>{{ kb.description || '这个知识库还没有描述。' }}</p>
             </div>
             <div class="toolbar-inline">
-              <span class="status-tag success">知识库已选择</span>
+              <el-button :icon="ArrowLeft" plain @click="router.push('/kbs')">返回列表</el-button>
               <span class="status-tag">成员角色 {{ currentMemberRole || '-' }}</span>
-              <span class="status-tag">Phase 2</span>
             </div>
           </div>
 
-          <el-tabs v-model="activeTab">
-            <el-tab-pane label="Documents" name="documents">
-              <DocumentsTab :kb-id="kb.id" :current-member-role="currentMemberRole" />
-            </el-tab-pane>
-            <el-tab-pane label="Chat" name="chat">
-              <ChatTab :kb-id="kb.id" @traced="onChatTraced" />
-            </el-tab-pane>
-            <el-tab-pane label="Members" name="members">
-              <MembersTab :kb-id="kb.id" :current-member-role="currentMemberRole" @changed="loadKb" />
-            </el-tab-pane>
-            <el-tab-pane label="QaTrace" name="traces">
-              <QaTraceTab :kb-id="kb.id" :refresh-key="traceRefreshKey" />
-            </el-tab-pane>
-            <el-tab-pane label="Evaluation" name="evaluation">
-              <EvaluationTab />
-            </el-tab-pane>
-          </el-tabs>
+          <div class="workspace-panel">
+            <DocumentsTab
+              v-if="activeTab === 'documents'"
+              :kb-id="kb.id"
+              :current-member-role="currentMemberRole"
+            />
+            <ChatTab
+              v-else-if="activeTab === 'chat'"
+              :kb-id="kb.id"
+              :kb-name="kb.name"
+              @traced="onChatTraced"
+            />
+            <MembersTab
+              v-else-if="activeTab === 'members'"
+              :kb-id="kb.id"
+              :current-member-role="currentMemberRole"
+              @changed="loadKb"
+            />
+            <QaTraceTab v-else-if="activeTab === 'traces'" :kb-id="kb.id" :refresh-key="traceRefreshKey" />
+            <EvaluationTab v-else-if="activeTab === 'evaluation'" />
+          </div>
         </template>
       </section>
     </div>

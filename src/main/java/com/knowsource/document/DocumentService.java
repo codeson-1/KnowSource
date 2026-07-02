@@ -6,11 +6,16 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Locale;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knowsource.index.DocumentIndexOutboxService;
 import com.knowsource.index.VectorIndexService;
 import com.knowsource.security.CurrentUser;
@@ -36,10 +41,30 @@ public class DocumentService {
             d.created_by, d.published_at, d.vectors_synced_at, d.created_at,
             latest_ingest.id AS latest_ingest_task_id,
             latest_ingest.status AS latest_ingest_status,
+            latest_ingest.page_count AS latest_ingest_page_count,
+            latest_ingest.extracted_page_count AS latest_ingest_extracted_page_count,
+            latest_ingest.empty_page_count AS latest_ingest_empty_page_count,
+            latest_ingest.table_count AS latest_ingest_table_count,
+            latest_ingest.structured_table_count AS latest_ingest_structured_table_count,
+            latest_ingest.failed_page_count AS latest_ingest_failed_page_count,
+            latest_ingest.ocr_required_page_count AS latest_ingest_ocr_required_page_count,
+            latest_ingest.ocr_applied_page_count AS latest_ingest_ocr_applied_page_count,
+            latest_ingest.quality_report::text AS latest_ingest_quality_report,
             COALESCE(parent_counts.parent_chunk_count, 0) AS parent_chunk_count,
             COALESCE(child_counts.child_chunk_count, 0) AS child_chunk_count,
             latest_failed_index.id AS latest_failed_index_event_id
             """;
+
+    private static final String LATEST_INGEST_SELECT_COLUMNS = """
+            SELECT id, status, page_count, extracted_page_count, empty_page_count, table_count,
+                   structured_table_count, failed_page_count, ocr_required_page_count, ocr_applied_page_count,
+                   quality_report
+            """;
+
+    private static final TypeReference<List<String>> STRING_LIST_TYPE = new TypeReference<>() {
+    };
+    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
+    };
 
     private final JdbcClient jdbcClient;
     private final CurrentUserService currentUserService;
@@ -50,6 +75,7 @@ public class DocumentService {
     private final VectorIndexService vectorIndexService;
     private final TransactionTemplate transactionTemplate;
     private final AsyncTaskExecutor ingestExecutor;
+    private final ObjectMapper objectMapper;
     private final long maxFileSizeBytes;
 
     public DocumentService(
@@ -62,6 +88,7 @@ public class DocumentService {
             VectorIndexService vectorIndexService,
             TransactionTemplate transactionTemplate,
             @Qualifier("ingestExecutor") AsyncTaskExecutor ingestExecutor,
+            ObjectMapper objectMapper,
             @Value("${knowsource.ingest.max-file-size-bytes:52428800}") long maxFileSizeBytes) {
         this.jdbcClient = jdbcClient;
         this.currentUserService = currentUserService;
@@ -72,6 +99,7 @@ public class DocumentService {
         this.vectorIndexService = vectorIndexService;
         this.transactionTemplate = transactionTemplate;
         this.ingestExecutor = ingestExecutor;
+        this.objectMapper = objectMapper;
         this.maxFileSizeBytes = maxFileSizeBytes;
     }
 
@@ -170,7 +198,7 @@ public class DocumentService {
                 """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
                 LEFT JOIN LATERAL (
-                    SELECT id, status
+                    """ + LATEST_INGEST_SELECT_COLUMNS + """
                     FROM ingest_tasks
                     WHERE doc_id = d.id
                     ORDER BY created_at DESC, id DESC
@@ -197,20 +225,24 @@ public class DocumentService {
                 ORDER BY d.created_at DESC, d.id DESC
                 """)
                 .param("kbId", kbId)
-                .query(DocumentService::mapDocument)
+                .query(this::mapDocument)
                 .list();
     }
 
     public DocumentResponse getDocument(String docId) {
         long userId = currentUserService.currentUserId();
+        CurrentUser user = currentUserService.currentUser();
+        String memberJoin = "ADMIN".equals(user.globalRole())
+                ? "LEFT JOIN kb_members member ON member.kb_id = d.kb_id AND member.user_id = :userId "
+                : "JOIN kb_members member ON member.kb_id = d.kb_id ";
 
         return jdbcClient.sql("""
                 SELECT
                 """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
-                JOIN kb_members member ON member.kb_id = d.kb_id
+                """ + memberJoin + """
                 LEFT JOIN LATERAL (
-                    SELECT id, status
+                    """ + LATEST_INGEST_SELECT_COLUMNS + """
                     FROM ingest_tasks
                     WHERE doc_id = d.id
                     ORDER BY created_at DESC, id DESC
@@ -233,11 +265,13 @@ public class DocumentService {
                     ORDER BY updated_at DESC, created_at DESC, id DESC
                     LIMIT 1
                 ) latest_failed_index ON TRUE
-                WHERE d.id = :docId AND member.user_id = :userId
+                WHERE d.id = :docId
+                  AND (member.user_id = :userId OR 'ADMIN' = :globalRole)
                 """)
                 .param("docId", docId)
                 .param("userId", userId)
-                .query(DocumentService::mapDocument)
+                .param("globalRole", user.globalRole())
+                .query(this::mapDocument)
                 .optional()
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found."));
     }
@@ -246,14 +280,15 @@ public class DocumentService {
         DocumentResponse document = getDocument(docId);
 
         return jdbcClient.sql("""
-                SELECT id, doc_id, doc_version, parent_chunk_id, content, chunk_index, page_number, chunk_type
+                SELECT id, doc_id, doc_version, parent_chunk_id, content, chunk_index, page_number, chunk_type,
+                       metadata::text AS metadata
                 FROM chunk_children
                 WHERE doc_id = :docId AND doc_version = :docVersion
                 ORDER BY chunk_index ASC
                 """)
                 .param("docId", document.id())
                 .param("docVersion", document.version())
-                .query(DocumentService::mapChunk)
+                .query(this::mapChunk)
                 .list();
     }
 
@@ -415,42 +450,81 @@ public class DocumentService {
 
     public InputStream openSourcePreview(String sourceKey) throws IOException {
         long userId = currentUserService.currentUserId();
-        DocumentResponse document = jdbcClient.sql("""
-                SELECT
-                """ + DOCUMENT_SELECT_COLUMNS + """
-                FROM documents d
-                JOIN kb_members member ON member.kb_id = d.kb_id
-                LEFT JOIN LATERAL (
-                    SELECT id, status
-                    FROM ingest_tasks
-                    WHERE doc_id = d.id
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                ) latest_ingest ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT COUNT(*) AS parent_chunk_count
-                    FROM chunk_parents
-                    WHERE doc_id = d.id AND doc_version = d.version
-                ) parent_counts ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT COUNT(*) AS child_chunk_count
-                    FROM chunk_children
-                    WHERE doc_id = d.id AND doc_version = d.version
-                ) child_counts ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT id
-                    FROM document_publish_events
-                    WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
-                    ORDER BY updated_at DESC, created_at DESC, id DESC
-                    LIMIT 1
-                ) latest_failed_index ON TRUE
-                WHERE d.oss_key = :sourceKey AND member.user_id = :userId
-                """)
-                .param("sourceKey", sourceKey)
-                .param("userId", userId)
-                .query(DocumentService::mapDocument)
-                .optional()
-                .orElseThrow(() -> new ResourceNotFoundException("Document source not found."));
+        CurrentUser user = currentUserService.currentUser();
+        DocumentResponse document;
+        if ("ADMIN".equals(user.globalRole())) {
+            document = jdbcClient.sql("""
+                    SELECT
+                    """ + DOCUMENT_SELECT_COLUMNS + """
+                    FROM documents d
+                    LEFT JOIN LATERAL (
+                        """ + LATEST_INGEST_SELECT_COLUMNS + """
+                        FROM ingest_tasks
+                        WHERE doc_id = d.id
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_ingest ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS parent_chunk_count
+                        FROM chunk_parents
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) parent_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS child_chunk_count
+                        FROM chunk_children
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) child_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT id
+                        FROM document_publish_events
+                        WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_failed_index ON TRUE
+                    WHERE d.oss_key = :sourceKey
+                    """)
+                    .param("sourceKey", sourceKey)
+                    .query(this::mapDocument)
+                    .optional()
+                    .orElseThrow(() -> new ResourceNotFoundException("Document source not found."));
+        } else {
+            document = jdbcClient.sql("""
+                    SELECT
+                    """ + DOCUMENT_SELECT_COLUMNS + """
+                    FROM documents d
+                    JOIN kb_members member ON member.kb_id = d.kb_id
+                    LEFT JOIN LATERAL (
+                        """ + LATEST_INGEST_SELECT_COLUMNS + """
+                        FROM ingest_tasks
+                        WHERE doc_id = d.id
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_ingest ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS parent_chunk_count
+                        FROM chunk_parents
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) parent_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS child_chunk_count
+                        FROM chunk_children
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) child_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT id
+                        FROM document_publish_events
+                        WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_failed_index ON TRUE
+                    WHERE d.oss_key = :sourceKey AND member.user_id = :userId
+                    """)
+                    .param("sourceKey", sourceKey)
+                    .param("userId", userId)
+                    .query(this::mapDocument)
+                    .optional()
+                    .orElseThrow(() -> new ResourceNotFoundException("Document source not found."));
+        }
         if (!document.ossKey().startsWith("local://") && !document.ossKey().startsWith("oss://")) {
             throw new IllegalArgumentException("Document source preview is available only for uploaded files.");
         }
@@ -462,6 +536,44 @@ public class DocumentService {
             DocumentResponse document = getDocumentForMember(docId, user.id());
             requireKbWriteAccess(document.kbId(), user);
             requireLatestIngestReady(docId);
+
+            // Idempotency #1: already published and fully indexed -> no-op, no new event.
+            if ("PUBLISHED".equals(document.status()) && "SYNCED".equals(document.indexStatus())) {
+                return new DocumentPublishResponse(
+                        document.id(),
+                        document.kbId(),
+                        document.version(),
+                        document.indexStatus(),
+                        null,
+                        "Document is already published and indexed.");
+            }
+
+            // Idempotency #2: an unprocessed publish event for this version already exists
+            // (e.g. rapid double-click) -> reuse it instead of enqueuing a duplicate embedding.
+            String existingEventId = jdbcClient.sql("""
+                    SELECT id
+                    FROM document_publish_events
+                    WHERE doc_id = :docId
+                      AND doc_version = :docVersion
+                      AND event_type = 'PUBLISH'
+                      AND status IN ('PENDING', 'FAILED')
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """)
+                    .param("docId", docId)
+                    .param("docVersion", document.version())
+                    .query(String.class)
+                    .optional()
+                    .orElse(null);
+            if (existingEventId != null) {
+                return new DocumentPublishResponse(
+                        document.id(),
+                        document.kbId(),
+                        document.version(),
+                        document.indexStatus(),
+                        existingEventId,
+                        "Document publish already queued; indexing is pending.");
+            }
 
             String eventId = UUID.randomUUID().toString();
 
@@ -514,6 +626,15 @@ public class DocumentService {
                               created_by, published_at, vectors_synced_at, created_at,
                               NULL AS latest_ingest_task_id,
                               NULL AS latest_ingest_status,
+                              0 AS latest_ingest_page_count,
+                              0 AS latest_ingest_extracted_page_count,
+                              0 AS latest_ingest_empty_page_count,
+                              0 AS latest_ingest_table_count,
+                              0 AS latest_ingest_structured_table_count,
+                              0 AS latest_ingest_failed_page_count,
+                              0 AS latest_ingest_ocr_required_page_count,
+                              0 AS latest_ingest_ocr_applied_page_count,
+                              '{}'::jsonb::text AS latest_ingest_quality_report,
                               0 AS parent_chunk_count,
                               0 AS child_chunk_count,
                               NULL AS latest_failed_index_event_id
@@ -524,7 +645,7 @@ public class DocumentService {
                     .param("ossKey", ossKey)
                     .param("fileType", fileType)
                     .param("createdBy", userId)
-                    .query(DocumentService::mapDocument)
+                    .query(this::mapDocument)
                     .single();
 
             jdbcClient.sql("""
@@ -565,6 +686,15 @@ public class DocumentService {
                               created_by, published_at, vectors_synced_at, created_at,
                               NULL AS latest_ingest_task_id,
                               NULL AS latest_ingest_status,
+                              0 AS latest_ingest_page_count,
+                              0 AS latest_ingest_extracted_page_count,
+                              0 AS latest_ingest_empty_page_count,
+                              0 AS latest_ingest_table_count,
+                              0 AS latest_ingest_structured_table_count,
+                              0 AS latest_ingest_failed_page_count,
+                              0 AS latest_ingest_ocr_required_page_count,
+                              0 AS latest_ingest_ocr_applied_page_count,
+                              '{}'::jsonb::text AS latest_ingest_quality_report,
                               0 AS parent_chunk_count,
                               0 AS child_chunk_count,
                               NULL AS latest_failed_index_event_id
@@ -574,7 +704,7 @@ public class DocumentService {
                     .param("ossKey", ossKey)
                     .param("version", nextVersion)
                     .param("fileType", fileType)
-                    .query(DocumentService::mapDocument)
+                    .query(this::mapDocument)
                     .single();
 
             jdbcClient.sql("""
@@ -593,15 +723,37 @@ public class DocumentService {
             String docId,
             int docVersion,
             String ingestTaskId,
-            List<SimpleTextChunker.ParentChunk> parentChunks) {
+            List<SimpleTextChunker.ParentChunk> parentChunks,
+            ExtractionQualityReport qualityReport) {
         return transactionTemplate.execute(status -> {
             int childChunkCount = persistChunks(docId, docVersion, parentChunks);
+            ExtractionQualityReport normalizedReport = normalizeQualityReport(qualityReport);
             jdbcClient.sql("""
                     UPDATE ingest_tasks
-                    SET status = 'READY', finished_at = NOW(), error_message = NULL
+                    SET status = 'READY',
+                        finished_at = NOW(),
+                        error_message = NULL,
+                        page_count = :pageCount,
+                        extracted_page_count = :extractedPageCount,
+                        empty_page_count = :emptyPageCount,
+                        table_count = :tableCount,
+                        structured_table_count = :structuredTableCount,
+                        failed_page_count = :failedPageCount,
+                        ocr_required_page_count = :ocrRequiredPageCount,
+                        ocr_applied_page_count = :ocrAppliedPageCount,
+                        quality_report = CAST(:qualityReport AS jsonb)
                     WHERE id = :id
                     """)
                     .param("id", ingestTaskId)
+                    .param("pageCount", normalizedReport.pageCount())
+                    .param("extractedPageCount", normalizedReport.extractedPageCount())
+                    .param("emptyPageCount", normalizedReport.emptyPageCount())
+                    .param("tableCount", normalizedReport.tableCount())
+                    .param("structuredTableCount", normalizedReport.structuredTableCount())
+                    .param("failedPageCount", normalizedReport.failedPageCount())
+                    .param("ocrRequiredPageCount", normalizedReport.ocrRequiredPageCount())
+                    .param("ocrAppliedPageCount", normalizedReport.ocrAppliedPageCount())
+                    .param("qualityReport", qualityReportJson(normalizedReport))
                     .update();
             return childChunkCount;
         });
@@ -630,8 +782,11 @@ public class DocumentService {
     private void parseAndPersistChunks(String docId, int docVersion, String ingestTaskId, String content) {
         try {
             markIngestParsing(ingestTaskId);
-            List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(content);
-            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks);
+            ExtractedDocument extractedDocument = normalizeExtractedDocument(ExtractedDocument.text(content));
+            List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(extractedDocument);
+            ExtractionQualityReport qualityReport = qualityReportWithChunkCounts(
+                    extractedDocument.qualityReport(), extractedDocument.blocks());
+            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks, qualityReport);
         } catch (RuntimeException ex) {
             markIngestFailed(ingestTaskId, ex);
         }
@@ -647,9 +802,13 @@ public class DocumentService {
             markIngestParsing(ingestTaskId);
             ExtractedDocument extractedDocument = normalizeExtractedDocument(documentTextExtractor.extract(sourceKey, fileType));
             List<SimpleTextChunker.ParentChunk> parentChunks = textChunker.split(extractedDocument);
-            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks);
+            ExtractionQualityReport qualityReport = qualityReportWithChunkCounts(
+                    extractedDocument.qualityReport(), extractedDocument.blocks());
+            persistChunksAndMarkReady(docId, docVersion, ingestTaskId, parentChunks, qualityReport);
         } catch (IOException ex) {
             markIngestFailed(ingestTaskId, new IllegalStateException("Failed to read source file.", ex));
+        } catch (DocumentExtractionException ex) {
+            markIngestFailed(ingestTaskId, ex);
         } catch (RuntimeException ex) {
             markIngestFailed(ingestTaskId, ex);
         }
@@ -671,7 +830,16 @@ public class DocumentService {
                 SET status = 'PENDING',
                     started_at = NULL,
                     finished_at = NULL,
-                    error_message = NULL
+                    error_message = NULL,
+                    page_count = 0,
+                    extracted_page_count = 0,
+                    empty_page_count = 0,
+                    table_count = 0,
+                    structured_table_count = 0,
+                    failed_page_count = 0,
+                    ocr_required_page_count = 0,
+                    ocr_applied_page_count = 0,
+                    quality_report = '{}'::jsonb
                 WHERE id = :id
                 """)
                 .param("id", ingestTaskId)
@@ -679,13 +847,36 @@ public class DocumentService {
     }
 
     private void markIngestFailed(String ingestTaskId, RuntimeException ex) {
+        ExtractionQualityReport report = ex instanceof DocumentExtractionException extractionException
+                ? normalizeQualityReport(extractionException.qualityReport())
+                : ExtractionQualityReport.empty();
         transactionTemplate.executeWithoutResult(status -> jdbcClient.sql("""
                 UPDATE ingest_tasks
-                SET status = 'FAILED', finished_at = NOW(), error_message = :errorMessage
+                SET status = 'FAILED',
+                    finished_at = NOW(),
+                    error_message = :errorMessage,
+                    page_count = :pageCount,
+                    extracted_page_count = :extractedPageCount,
+                    empty_page_count = :emptyPageCount,
+                    table_count = :tableCount,
+                    structured_table_count = :structuredTableCount,
+                    failed_page_count = :failedPageCount,
+                    ocr_required_page_count = :ocrRequiredPageCount,
+                    ocr_applied_page_count = :ocrAppliedPageCount,
+                    quality_report = CAST(:qualityReport AS jsonb)
                 WHERE id = :id
                 """)
                 .param("id", ingestTaskId)
                 .param("errorMessage", failureMessage(ex))
+                .param("pageCount", report.pageCount())
+                .param("extractedPageCount", report.extractedPageCount())
+                .param("emptyPageCount", report.emptyPageCount())
+                .param("tableCount", report.tableCount())
+                .param("structuredTableCount", report.structuredTableCount())
+                .param("failedPageCount", report.failedPageCount())
+                .param("ocrRequiredPageCount", report.ocrRequiredPageCount())
+                .param("ocrAppliedPageCount", report.ocrAppliedPageCount())
+                .param("qualityReport", qualityReportJson(report))
                 .update());
     }
 
@@ -694,6 +885,38 @@ public class DocumentService {
             return ex.getMessage();
         }
         return ex.getClass().getSimpleName();
+    }
+
+    private ExtractionQualityReport qualityReportWithChunkCounts(
+            ExtractionQualityReport report,
+            List<ExtractedBlock> blocks) {
+        ExtractionQualityReport normalized = normalizeQualityReport(report);
+        if (normalized.pageCount() > 0) {
+            return normalized;
+        }
+        int tableCount = (int) blocks.stream()
+                .filter(block -> "TABLE".equalsIgnoreCase(block.chunkType()))
+                .count();
+        int structuredTableCount = (int) blocks.stream()
+                .filter(block -> block.table() != null)
+                .count();
+        return new ExtractionQualityReport(
+                0,
+                0,
+                0,
+                tableCount,
+                structuredTableCount,
+                0,
+                0,
+                0,
+                List.of(),
+                List.of(),
+                List.of(),
+                normalized.warnings());
+    }
+
+    private ExtractionQualityReport normalizeQualityReport(ExtractionQualityReport report) {
+        return report == null ? ExtractionQualityReport.empty() : report;
     }
 
     private int persistChunks(String docId, int docVersion, List<SimpleTextChunker.ParentChunk> parentChunks) {
@@ -739,43 +962,57 @@ public class DocumentService {
     }
 
     private String parentMetadataJson(SimpleTextChunker.ParentChunk parentChunk) {
-        return """
-                {"blockIndex":%d,"sectionPath":%s,"tableCaption":%s,"startOffset":%d,"endOffset":%d,"parentIndex":%d}
-                """.formatted(
-                        parentChunk.blockIndex(),
-                        jsonArray(parentChunk.sectionPath()),
-                        jsonStringOrNull(parentChunk.tableCaption()),
-                        parentChunk.startOffset(),
-                        parentChunk.endOffset(),
-                        parentChunk.parentIndex())
-                .trim();
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("blockIndex", parentChunk.blockIndex());
+        metadata.put("sectionPath", parentChunk.sectionPath());
+        metadata.put("tableCaption", parentChunk.tableCaption());
+        metadata.put("table", tableMetadata(parentChunk.table()));
+        metadata.put("startOffset", parentChunk.startOffset());
+        metadata.put("endOffset", parentChunk.endOffset());
+        metadata.put("parentIndex", parentChunk.parentIndex());
+        return json(metadata);
     }
 
     private String childMetadataJson(SimpleTextChunker.ChildChunk childChunk) {
-        return """
-                {"blockIndex":%d,"sectionPath":%s,"tableCaption":%s,"startOffset":%d,"endOffset":%d}
-                """.formatted(
-                        childChunk.blockIndex(),
-                        jsonArray(childChunk.sectionPath()),
-                        jsonStringOrNull(childChunk.tableCaption()),
-                        childChunk.startOffset(),
-                        childChunk.endOffset())
-                .trim();
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("blockIndex", childChunk.blockIndex());
+        metadata.put("sectionPath", childChunk.sectionPath());
+        metadata.put("tableCaption", childChunk.tableCaption());
+        metadata.put("table", tableMetadata(childChunk.table()));
+        metadata.put("startOffset", childChunk.startOffset());
+        metadata.put("endOffset", childChunk.endOffset());
+        return json(metadata);
     }
 
-    private String jsonArray(List<String> values) {
-        if (values == null || values.isEmpty()) {
-            return "[]";
+    private Map<String, Object> tableMetadata(ExtractedTable table) {
+        if (table == null) {
+            return null;
         }
-        return "[" + String.join(",", values.stream().map(this::jsonString).toList()) + "]";
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("headers", table.headers());
+        metadata.put("rows", table.rows());
+        metadata.put("markdown", table.markdown());
+        metadata.put("rowCount", table.rowCount());
+        metadata.put("columnCount", table.columnCount());
+        return metadata;
     }
 
-    private String jsonStringOrNull(String value) {
-        return StringUtils.hasText(value) ? jsonString(value) : "null";
+    private String qualityReportJson(ExtractionQualityReport report) {
+        ExtractionQualityReport normalized = normalizeQualityReport(report);
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("emptyPages", normalized.emptyPages());
+        value.put("failedPages", normalized.failedPages());
+        value.put("ocrRequiredPages", normalized.ocrRequiredPages());
+        value.put("warnings", normalized.warnings());
+        return json(value);
     }
 
-    private String jsonString(String value) {
-        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    private String json(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("Failed to serialize document metadata.", ex);
+        }
     }
 
     private UploadedFile validateUpload(String title, MultipartFile file) {
@@ -862,6 +1099,16 @@ public class DocumentService {
     }
 
     private void requireKbMember(String kbId, long userId) {
+        if ("ADMIN".equals(currentUserService.currentUser().globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members
@@ -898,13 +1145,50 @@ public class DocumentService {
     }
 
     private DocumentResponse getDocumentForMember(String docId, long userId) {
+        CurrentUser user = currentUserService.currentUser();
+        if ("ADMIN".equals(user.globalRole())) {
+            return jdbcClient.sql("""
+                    SELECT
+                    """ + DOCUMENT_SELECT_COLUMNS + """
+                    FROM documents d
+                    LEFT JOIN LATERAL (
+                        """ + LATEST_INGEST_SELECT_COLUMNS + """
+                        FROM ingest_tasks
+                        WHERE doc_id = d.id
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_ingest ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS parent_chunk_count
+                        FROM chunk_parents
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) parent_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT COUNT(*) AS child_chunk_count
+                        FROM chunk_children
+                        WHERE doc_id = d.id AND doc_version = d.version
+                    ) child_counts ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT id
+                        FROM document_publish_events
+                        WHERE doc_id = d.id AND doc_version = d.version AND status = 'FAILED'
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                        LIMIT 1
+                    ) latest_failed_index ON TRUE
+                    WHERE d.id = :docId
+                    """)
+                    .param("docId", docId)
+                    .query(this::mapDocument)
+                    .optional()
+                    .orElseThrow(() -> new ResourceNotFoundException("Document not found."));
+        }
         return jdbcClient.sql("""
                 SELECT
                 """ + DOCUMENT_SELECT_COLUMNS + """
                 FROM documents d
                 JOIN kb_members member ON member.kb_id = d.kb_id
                 LEFT JOIN LATERAL (
-                    SELECT id, status
+                    """ + LATEST_INGEST_SELECT_COLUMNS + """
                     FROM ingest_tasks
                     WHERE doc_id = d.id
                     ORDER BY created_at DESC, id DESC
@@ -931,7 +1215,7 @@ public class DocumentService {
                 """)
                 .param("docId", docId)
                 .param("userId", userId)
-                .query(DocumentService::mapDocument)
+                .query(this::mapDocument)
                 .optional()
                 .orElseThrow(() -> new ResourceNotFoundException("Document not found."));
     }
@@ -989,15 +1273,16 @@ public class DocumentService {
                         StringUtils.hasText(block.chunkType()) ? block.chunkType().trim().toUpperCase(Locale.ROOT) : "TEXT",
                         block.blockIndex(),
                         block.sectionPath(),
-                        StringUtils.hasText(block.tableCaption()) ? block.tableCaption().trim() : null))
+                        StringUtils.hasText(block.tableCaption()) ? block.tableCaption().trim() : null,
+                        block.table()))
                 .toList();
         if (blocks.isEmpty()) {
             throw new IllegalArgumentException("Document content is required.");
         }
-        return new ExtractedDocument(blocks);
+        return new ExtractedDocument(blocks, document.qualityReport());
     }
 
-    private static DocumentResponse mapDocument(ResultSet rs, int rowNum) throws SQLException {
+    private DocumentResponse mapDocument(ResultSet rs, int rowNum) throws SQLException {
         return new DocumentResponse(
                 rs.getString("id"),
                 rs.getString("kb_id"),
@@ -1015,10 +1300,13 @@ public class DocumentService {
                 rs.getString("latest_ingest_status"),
                 rs.getInt("parent_chunk_count"),
                 rs.getInt("child_chunk_count"),
-                rs.getString("latest_failed_index_event_id"));
+                rs.getString("latest_failed_index_event_id"),
+                mapQualityReport(rs));
     }
 
-    private static DocumentChunkResponse mapChunk(ResultSet rs, int rowNum) throws SQLException {
+    private DocumentChunkResponse mapChunk(ResultSet rs, int rowNum) throws SQLException {
+        Map<String, Object> metadata = parseMetadata(rs.getString("metadata"));
+        Map<String, Object> table = nestedMap(metadata.get("table"));
         return new DocumentChunkResponse(
                 rs.getString("id"),
                 rs.getString("doc_id"),
@@ -1027,7 +1315,90 @@ public class DocumentService {
                 rs.getString("content"),
                 rs.getInt("chunk_index"),
                 (Integer) rs.getObject("page_number"),
-                rs.getString("chunk_type"));
+                rs.getString("chunk_type"),
+                stringList(metadata.get("sectionPath")),
+                stringValue(metadata.get("tableCaption")),
+                integerValue(metadata.get("startOffset")),
+                integerValue(metadata.get("endOffset")),
+                stringValue(table.get("markdown")),
+                integerValue(table.get("rowCount")),
+                integerValue(table.get("columnCount")));
+    }
+
+    private DocumentQualityReportResponse mapQualityReport(ResultSet rs) throws SQLException {
+        Map<String, Object> detail = parseMetadata(rs.getString("latest_ingest_quality_report"));
+        return new DocumentQualityReportResponse(
+                rs.getInt("latest_ingest_page_count"),
+                rs.getInt("latest_ingest_extracted_page_count"),
+                rs.getInt("latest_ingest_empty_page_count"),
+                rs.getInt("latest_ingest_table_count"),
+                rs.getInt("latest_ingest_structured_table_count"),
+                rs.getInt("latest_ingest_failed_page_count"),
+                rs.getInt("latest_ingest_ocr_required_page_count"),
+                rs.getInt("latest_ingest_ocr_applied_page_count"),
+                integerList(detail.get("emptyPages")),
+                integerList(detail.get("failedPages")),
+                integerList(detail.get("ocrRequiredPages")),
+                stringList(detail.get("warnings")));
+    }
+
+    private Map<String, Object> parseMetadata(String metadataJson) {
+        if (!StringUtils.hasText(metadataJson)) {
+            return Map.of();
+        }
+        try {
+            return objectMapper.readValue(metadataJson, MAP_TYPE);
+        } catch (JsonProcessingException ex) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Object> nestedMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((key, mapValue) -> result.put(String.valueOf(key), mapValue));
+            return result;
+        }
+        return Map.of();
+    }
+
+    private List<String> stringList(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        try {
+            return objectMapper.convertValue(value, STRING_LIST_TYPE);
+        } catch (IllegalArgumentException ex) {
+            return List.of();
+        }
+    }
+
+    private List<Integer> integerList(Object value) {
+        if (value instanceof List<?> values) {
+            return values.stream()
+                    .map(this::integerValue)
+                    .filter(number -> number != null)
+                    .toList();
+        }
+        return List.of();
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private Integer integerValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String string && StringUtils.hasText(string)) {
+            try {
+                return Integer.parseInt(string);
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static IngestTask mapIngestTask(ResultSet rs, int rowNum) throws SQLException {

@@ -4,6 +4,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import io.micrometer.core.instrument.MeterRegistry;
@@ -76,16 +77,24 @@ public class VectorIndexService {
 
         return transactionTemplate.execute(status -> {
             deleteDocumentVectors(docId);
+            String documentTitle = loadDocumentTitle(kbId, docId, docVersion);
 
             for (int i = 0; i < chunks.size(); i++) {
                 ChunkForIndex chunk = chunks.get(i);
                 jdbcClient.sql("""
-                        INSERT INTO vector_store (id, content, metadata, embedding, kb_id, doc_id, status, doc_version)
-                        VALUES (CAST(:id AS uuid), :content, CAST(:metadata AS jsonb), CAST(:embedding AS vector),
-                                :kbId, :docId, 'published', :docVersion)
+                        INSERT INTO vector_store (
+                            id, content, content_tokens, doc_title, metadata, embedding,
+                            kb_id, doc_id, status, doc_version
+                        )
+                        VALUES (
+                            CAST(:id AS uuid), :content, :contentTokens, :docTitle, CAST(:metadata AS jsonb),
+                            CAST(:embedding AS vector), :kbId, :docId, 'published', :docVersion
+                        )
                         """)
                         .param("id", UUID.randomUUID().toString())
                         .param("content", chunk.content())
+                        .param("contentTokens", TextTokenizer.joinForTsv(chunk.content()))
+                        .param("docTitle", documentTitle)
                         .param("metadata", metadataJson(kbId, chunk))
                         .param("embedding", vectorLiteral(embeddings.get(i)))
                         .param("kbId", kbId)
@@ -132,6 +141,18 @@ public class VectorIndexService {
                 .param("docVersion", docVersion)
                 .query(VectorIndexService::mapChunk)
                 .list();
+    }
+
+    private String loadDocumentTitle(String kbId, String docId, int docVersion) {
+        return jdbcClient.sql("""
+                SELECT title
+                FROM documents
+                WHERE id = :docId AND kb_id = :kbId AND version = :docVersion
+                """)
+                .params(Map.of("docId", docId, "kbId", kbId, "docVersion", docVersion))
+                .query(String.class)
+                .optional()
+                .orElse("");
     }
 
     private static ChunkForIndex mapChunk(ResultSet rs, int rowNum) throws SQLException {

@@ -107,6 +107,7 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.document.id").value(docId))
                 .andExpect(jsonPath("$.ingestStatus").value("READY"))
+                .andExpect(jsonPath("$.document.qualityReport.tableCount").value(0))
                 .andExpect(jsonPath("$.parentChunkCount").value(greaterThan(0)))
                 .andExpect(jsonPath("$.childChunkCount").value(greaterThan(0)));
 
@@ -140,6 +141,7 @@ class DocumentControllerTest {
                 .andExpect(jsonPath("$[0].status").value("DRAFT"))
                 .andExpect(jsonPath("$[0].latestIngestTaskId").isNotEmpty())
                 .andExpect(jsonPath("$[0].latestIngestStatus").value("READY"))
+                .andExpect(jsonPath("$[0].qualityReport.tableCount").value(0))
                 .andExpect(jsonPath("$[0].parentChunkCount").value(greaterThan(0)))
                 .andExpect(jsonPath("$[0].childChunkCount").value(greaterThan(0)));
     }
@@ -305,7 +307,18 @@ class DocumentControllerTest {
 
         mockMvc.perform(get("/api/documents/{docId}/chunks", docId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("Benefits > Leave")));
+                .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("Benefits > Leave")))
+                .andExpect(jsonPath("$[0].sectionPath[0]").value("Benefits"))
+                .andExpect(jsonPath("$[0].sectionPath[1]").value("Leave"))
+                .andExpect(jsonPath("$[0].tableCaption").value("Leave"))
+                .andExpect(jsonPath("$[0].tableMarkdown").value(org.hamcrest.Matchers.containsString("| Type | Days |")))
+                .andExpect(jsonPath("$[0].tableRowCount").value(2))
+                .andExpect(jsonPath("$[0].tableColumnCount").value(2));
+
+        mockMvc.perform(get("/api/documents/{docId}", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.qualityReport.tableCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.structuredTableCount").value(1));
     }
 
     @Test
@@ -371,6 +384,13 @@ class DocumentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(greaterThan(0))))
                 .andExpect(jsonPath("$[0].content").value(org.hamcrest.Matchers.containsString("manager approval")));
+
+        mockMvc.perform(get("/api/documents/{docId}", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.qualityReport.pageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.extractedPageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.emptyPageCount").value(0))
+                .andExpect(jsonPath("$.qualityReport.failedPageCount").value(0));
     }
 
     @Test
@@ -440,7 +460,42 @@ class DocumentControllerTest {
         mockMvc.perform(get("/api/documents/{docId}/ingest-task", docId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.ingestStatus").value("FAILED"))
+                .andExpect(jsonPath("$.document.qualityReport.pageCount").value(0))
                 .andExpect(jsonPath("$.childChunkCount").value(0));
+    }
+
+    @Test
+    void scannedPdfRecordsQualityReportWhenOcrIsRequired() throws Exception {
+        String kbId = createKnowledgeBase("Scanned PDF KB");
+        MockMultipartFile file = new MockMultipartFile(
+                "file",
+                "scan.pdf",
+                "application/pdf",
+                blankPdfBytes());
+
+        MvcResult result = mockMvc.perform(multipart("/api/kbs/{kbId}/documents/upload", kbId)
+                        .file(file)
+                        .param("title", "Scanned Contract"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.document.fileType").value("PDF"))
+                .andReturn();
+
+        String docId = objectMapper.readTree(result.getResponse().getContentAsString())
+                .path("document")
+                .path("id")
+                .asText();
+        waitForIngestStatus(docId, "FAILED");
+
+        mockMvc.perform(get("/api/documents/{docId}", docId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.qualityReport.pageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.emptyPageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.failedPageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.ocrRequiredPageCount").value(1))
+                .andExpect(jsonPath("$.qualityReport.ocrAppliedPageCount").value(0))
+                .andExpect(jsonPath("$.qualityReport.emptyPages[0]").value(1))
+                .andExpect(jsonPath("$.qualityReport.failedPages[0]").value(1))
+                .andExpect(jsonPath("$.qualityReport.ocrRequiredPages[0]").value(1));
     }
 
     @Test
@@ -611,6 +666,16 @@ class DocumentControllerTest {
                     contentStream.endText();
                 }
             }
+            try (var output = new java.io.ByteArrayOutputStream()) {
+                document.save(output);
+                return output.toByteArray();
+            }
+        }
+    }
+
+    private byte[] blankPdfBytes() throws Exception {
+        try (PDDocument document = new PDDocument()) {
+            document.addPage(new PDPage());
             try (var output = new java.io.ByteArrayOutputStream()) {
                 document.save(output);
                 return output.toByteArray();

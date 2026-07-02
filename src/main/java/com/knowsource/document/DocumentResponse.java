@@ -19,5 +19,6 @@ public record DocumentResponse(
         String latestIngestStatus,
         int parentChunkCount,
         int childChunkCount,
-        String latestFailedIndexEventId) {
+        String latestFailedIndexEventId,
+        DocumentQualityReportResponse qualityReport) {
 }

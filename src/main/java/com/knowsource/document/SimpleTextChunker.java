@@ -29,16 +29,18 @@ public class SimpleTextChunker {
                 continue;
             }
             int blockIndex = block.blockIndex() == null ? fallbackBlockIndex : block.blockIndex();
-            for (TextRange parentRange : splitRanges(content, PARENT_CHUNK_SIZE, "TABLE".equals(normalizeChunkType(block.chunkType())))) {
+            String normalizedChunkType = normalizeChunkType(block.chunkType());
+            for (TextRange parentRange : splitRanges(content, PARENT_CHUNK_SIZE, preserveLines(normalizedChunkType))) {
                 String parentContent = content.substring(parentRange.start(), parentRange.end()).trim();
-                List<ChildChunk> childContents = splitRanges(parentContent, CHILD_CHUNK_SIZE, "TABLE".equals(normalizeChunkType(block.chunkType()))).stream()
+                List<ChildChunk> childContents = splitRanges(parentContent, CHILD_CHUNK_SIZE, preserveLines(normalizedChunkType)).stream()
                         .map(range -> new ChildChunk(
                                 parentContent.substring(range.start(), range.end()).trim(),
                                 block.pageNumber(),
-                                normalizeChunkType(block.chunkType()),
+                                normalizedChunkType,
                                 blockIndex,
                                 block.sectionPath(),
                                 block.tableCaption(),
+                                block.table(),
                                 parentRange.start() + range.start(),
                                 parentRange.start() + range.end()))
                         .filter(chunk -> !chunk.isEmpty())
@@ -49,10 +51,11 @@ public class SimpleTextChunker {
                             parentIndex,
                             parentContent,
                             block.pageNumber(),
-                            normalizeChunkType(block.chunkType()),
+                            normalizedChunkType,
                             blockIndex,
                             block.sectionPath(),
                             block.tableCaption(),
+                            block.table(),
                             parentRange.start(),
                             parentRange.end(),
                             childContents));
@@ -237,6 +240,10 @@ public class SimpleTextChunker {
         return StringUtils.hasText(chunkType) ? chunkType.trim().toUpperCase(Locale.ROOT) : "TEXT";
     }
 
+    private boolean preserveLines(String chunkType) {
+        return "TABLE".equals(chunkType) || "LIST".equals(chunkType);
+    }
+
     public record ParentChunk(
             int parentIndex,
             String content,
@@ -245,6 +252,7 @@ public class SimpleTextChunker {
             int blockIndex,
             List<String> sectionPath,
             String tableCaption,
+            ExtractedTable table,
             int startOffset,
             int endOffset,
             List<ChildChunk> children) {
@@ -257,6 +265,7 @@ public class SimpleTextChunker {
             int blockIndex,
             List<String> sectionPath,
             String tableCaption,
+            ExtractedTable table,
             int startOffset,
             int endOffset) {
 

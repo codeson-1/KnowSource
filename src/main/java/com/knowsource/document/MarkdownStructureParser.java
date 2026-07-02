@@ -34,24 +34,27 @@ class MarkdownStructureParser {
                 continue;
             }
 
-            if (isTableStart(lines, index)) {
+            if (StructuredTableParser.isMarkdownTableStart(lines, index)) {
                 flushParagraph(blocks, paragraph, headings);
                 List<String> tableLines = new ArrayList<>();
                 tableLines.add(lines.get(index));
                 tableLines.add(lines.get(index + 1));
                 index += 2;
-                while (index < lines.size() && looksLikeTableRow(lines.get(index))) {
+                while (index < lines.size() && StructuredTableParser.looksLikePipeRow(lines.get(index))) {
                     tableLines.add(lines.get(index));
                     index++;
                 }
                 List<String> sectionPath = activeHeadings(headings);
+                ExtractedTable table = StructuredTableParser.parseMarkdownTable(tableLines);
+                String tableContent = table == null ? String.join("\n", tableLines) : table.markdown();
                 blocks.add(new ExtractedBlock(
-                        withHeadingContext(String.join("\n", tableLines), sectionPath),
+                        withHeadingContext(tableContent, sectionPath),
                         null,
                         "TABLE",
                         blocks.size(),
                         sectionPath,
-                        sectionPath.isEmpty() ? null : sectionPath.getLast()));
+                        sectionPath.isEmpty() ? null : sectionPath.getLast(),
+                        table));
                 continue;
             }
 
@@ -77,6 +80,7 @@ class MarkdownStructureParser {
                     "TEXT",
                     blocks.size(),
                     sectionPath,
+                    null,
                     null));
         }
     }
@@ -105,29 +109,6 @@ class MarkdownStructureParser {
         }
         String text = trimmed.substring(level + 1).trim();
         return StringUtils.hasText(text) ? new Heading(level, text) : null;
-    }
-
-    private boolean isTableStart(List<String> lines, int index) {
-        return index + 1 < lines.size()
-                && looksLikeTableRow(lines.get(index))
-                && looksLikeTableSeparator(lines.get(index + 1));
-    }
-
-    private boolean looksLikeTableRow(String line) {
-        String trimmed = line.trim();
-        return trimmed.indexOf('|') >= 0 && trimmed.chars().filter(ch -> ch == '|').count() >= 2;
-    }
-
-    private boolean looksLikeTableSeparator(String line) {
-        String normalized = line.trim();
-        if (!looksLikeTableRow(normalized)) {
-            return false;
-        }
-        return normalized.replace("|", "")
-                .replace(":", "")
-                .replace("-", "")
-                .replace(" ", "")
-                .isEmpty();
     }
 
     private record Heading(int level, String text) {

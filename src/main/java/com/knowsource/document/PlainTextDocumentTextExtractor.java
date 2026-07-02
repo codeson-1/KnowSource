@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Set;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
@@ -24,25 +26,41 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
 
     private final SourceStorageService sourceStorageService;
     private final MarkdownStructureParser markdownStructureParser;
+    private final LocalOcrService localOcrService;
     private final AutoDetectParser parser = new AutoDetectParser();
 
     public PlainTextDocumentTextExtractor(
             SourceStorageService sourceStorageService,
-            MarkdownStructureParser markdownStructureParser) {
+            MarkdownStructureParser markdownStructureParser,
+            LocalOcrService localOcrService) {
         this.sourceStorageService = sourceStorageService;
         this.markdownStructureParser = markdownStructureParser;
+        this.localOcrService = localOcrService;
     }
 
     @Override
     public ExtractedDocument extract(String sourceKey, String fileType) throws IOException {
         if ("TEXT".equals(fileType)) {
             try (var inputStream = sourceStorageService.open(sourceKey)) {
-                return ExtractedDocument.text(new String(inputStream.readAllBytes(), StandardCharsets.UTF_8));
+                String text = new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
+                List<ExtractedBlock> blocks = new ArrayList<>();
+                addStructuredTextBlocks(blocks, text, null);
+                if (blocks.isEmpty()) {
+                    throw new DocumentExtractionException(
+                            "Document source contains no extractable text.",
+                            new ExtractionQualityReport(0, 0, 0, 0, 0, 0, 0, 0, List.of(), List.of(), List.of(),
+                                    List.of("Plain text source was empty.")));
+                }
+                return new ExtractedDocument(blocks, qualityReport(0, blocks, List.of(), List.of(), List.of(), 0, List.of()));
             }
         }
         if ("MARKDOWN".equals(fileType)) {
             try (var inputStream = sourceStorageService.open(sourceKey)) {
-                return markdownStructureParser.parse(new String(inputStream.readAllBytes(), StandardCharsets.UTF_8));
+                ExtractedDocument markdown = markdownStructureParser.parse(
+                        new String(inputStream.readAllBytes(), StandardCharsets.UTF_8));
+                return new ExtractedDocument(
+                        markdown.blocks(),
+                        qualityReport(0, markdown.blocks(), List.of(), List.of(), List.of(), 0, List.of()));
             }
         }
         if ("PDF".equals(fileType)) {
@@ -58,16 +76,52 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
         try (var inputStream = sourceStorageService.open(sourceKey);
                 PDDocument document = PDDocument.load(inputStream)) {
             PDFTextStripper stripper = new PDFTextStripper();
+            PDFRenderer renderer = new PDFRenderer(document);
             List<ExtractedBlock> blocks = new ArrayList<>();
+            List<Integer> emptyPages = new ArrayList<>();
+            List<Integer> failedPages = new ArrayList<>();
+            List<Integer> ocrRequiredPages = new ArrayList<>();
+            List<String> warnings = new ArrayList<>();
+            int ocrAppliedPages = 0;
             for (int page = 1; page <= document.getNumberOfPages(); page++) {
-                stripper.setStartPage(page);
-                stripper.setEndPage(page);
-                addStructuredTextBlocks(blocks, stripper.getText(document), page);
+                try {
+                    stripper.setStartPage(page);
+                    stripper.setEndPage(page);
+                    String pageText = stripper.getText(document);
+                    if (!StringUtils.hasText(pageText)) {
+                        emptyPages.add(page);
+                        ocrRequiredPages.add(page);
+                        if (localOcrService.enabled()) {
+                            try {
+                                var image = renderer.renderImageWithDPI(page - 1, 180, ImageType.RGB);
+                                var ocrText = localOcrService.extractText(image);
+                                if (ocrText.isPresent()) {
+                                    addStructuredTextBlocks(blocks, ocrText.get(), page);
+                                    ocrAppliedPages++;
+                                    continue;
+                                }
+                            } catch (IOException | InterruptedException ex) {
+                                if (ex instanceof InterruptedException) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                warnings.add("OCR failed on page " + page + ": " + ex.getClass().getSimpleName());
+                            }
+                        }
+                        failedPages.add(page);
+                        continue;
+                    }
+                    addStructuredTextBlocks(blocks, pageText, page);
+                } catch (IOException | RuntimeException ex) {
+                    failedPages.add(page);
+                    warnings.add("PDF page " + page + " failed: " + ex.getClass().getSimpleName());
+                }
             }
+            ExtractionQualityReport report = qualityReport(
+                    document.getNumberOfPages(), blocks, emptyPages, failedPages, ocrRequiredPages, ocrAppliedPages, warnings);
             if (blocks.isEmpty()) {
-                throw new IllegalArgumentException("Document source contains no extractable text.");
+                throw new DocumentExtractionException("Document source contains no extractable text.", report);
             }
-            return new ExtractedDocument(blocks);
+            return new ExtractedDocument(blocks, report);
         }
     }
 
@@ -79,11 +133,14 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
             parser.parse(inputStream, handler, metadata);
             String extractedText = handler.toString();
             if (!StringUtils.hasText(extractedText)) {
-                throw new IllegalArgumentException("Document source contains no extractable text.");
+                throw new DocumentExtractionException(
+                        "Document source contains no extractable text.",
+                        new ExtractionQualityReport(0, 0, 0, 0, 0, 0, 0, 0, List.of(), List.of(), List.of(),
+                                List.of("Tika returned no text.")));
             }
             List<ExtractedBlock> blocks = new ArrayList<>();
             addStructuredTextBlocks(blocks, extractedText, null);
-            return new ExtractedDocument(blocks);
+            return new ExtractedDocument(blocks, qualityReport(0, blocks, List.of(), List.of(), List.of(), 0, List.of()));
         } catch (TikaException | SAXException ex) {
             throw new IllegalArgumentException("Failed to parse document source.", ex);
         }
@@ -95,14 +152,17 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
             if (!StringUtils.hasText(block)) {
                 continue;
             }
-            String chunkType = looksLikeTable(block) ? "TABLE" : "TEXT";
+            ExtractedTable table = StructuredTableParser.parseIfTable(block);
+            String chunkType = table != null ? "TABLE" : (looksLikeList(block) ? "LIST" : "TEXT");
+            String content = table == null ? block : table.markdown();
             blocks.add(new ExtractedBlock(
-                    block,
+                    content,
                     pageNumber,
                     chunkType,
                     blocks.size(),
                     List.of(),
-                    "TABLE".equals(chunkType) ? firstNonBlankLine(block) : null));
+                    "TABLE".equals(chunkType) ? firstNonBlankLine(block) : null,
+                    table));
         }
     }
 
@@ -114,7 +174,7 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
                 .orElse(null);
     }
 
-    private boolean looksLikeTable(String block) {
+    private boolean looksLikeList(String block) {
         List<String> nonBlankLines = block.lines()
                 .map(String::trim)
                 .filter(StringUtils::hasText)
@@ -122,9 +182,45 @@ public class PlainTextDocumentTextExtractor implements DocumentTextExtractor {
         if (nonBlankLines.size() < 2) {
             return false;
         }
-        long tableLikeRows = nonBlankLines.stream()
-                .filter(line -> line.contains("|") || line.split("\\s{2,}").length >= 3 || line.split("\\t").length >= 3)
+        long listRows = nonBlankLines.stream()
+                .filter(line -> line.matches("^([-*+]\\s+|\\d+[.)]\\s+).+"))
                 .count();
-        return tableLikeRows >= 2;
+        return listRows >= 2;
+    }
+
+    private ExtractionQualityReport qualityReport(
+            int pageCount,
+            List<ExtractedBlock> blocks,
+            List<Integer> emptyPages,
+            List<Integer> failedPages,
+            List<Integer> ocrRequiredPages,
+            int ocrAppliedPages,
+            List<String> warnings) {
+        int tableCount = (int) blocks.stream()
+                .filter(block -> "TABLE".equalsIgnoreCase(block.chunkType()))
+                .count();
+        int structuredTableCount = (int) blocks.stream()
+                .filter(block -> block.table() != null)
+                .count();
+        int extractedPageCount = pageCount > 0
+                ? (int) blocks.stream()
+                        .map(ExtractedBlock::pageNumber)
+                        .filter(page -> page != null && page > 0)
+                        .distinct()
+                        .count()
+                : 0;
+        return new ExtractionQualityReport(
+                pageCount,
+                extractedPageCount,
+                emptyPages.size(),
+                tableCount,
+                structuredTableCount,
+                failedPages.size(),
+                ocrRequiredPages.size(),
+                ocrAppliedPages,
+                emptyPages,
+                failedPages,
+                ocrRequiredPages,
+                warnings);
     }
 }

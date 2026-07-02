@@ -526,6 +526,93 @@ class DocumentPublishControllerTest {
     }
 
     @Test
+    void doubleClickPublishCreatesSinglePendingEvent() throws Exception {
+        String kbId = createKnowledgeBase("Idempotent Publish KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+
+        MvcResult first = mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
+                .andExpect(jsonPath("$.message").value("Document published; indexing is pending."))
+                .andReturn();
+        String firstEventId = objectMapper.readTree(first.getResponse().getContentAsString())
+                .path("eventId")
+                .asText();
+
+        // Second click before the consumer runs must reuse the queued event, not enqueue a duplicate.
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("PENDING"))
+                .andExpect(jsonPath("$.eventId").value(firstEventId))
+                .andExpect(jsonPath("$.message").value("Document publish already queued; indexing is pending."));
+
+        Long pendingEvents = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE doc_id = :docId AND doc_version = 1 AND event_type = 'PUBLISH'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        assertThat(pendingEvents).isEqualTo(1);
+
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+        assertThat(indexOutboxService.processNextPendingEvent()).isFalse();
+
+        Long childChunks = jdbcClient.sql("SELECT COUNT(*) FROM chunk_children WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long vectorRows = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        // Exactly one embedding pass -> no duplicate vector rows.
+        assertThat(vectorRows).isEqualTo(childChunks);
+    }
+
+    @Test
+    void republishingSyncedDocumentIsNoOpAndDoesNotReEmbed() throws Exception {
+        String kbId = createKnowledgeBase("Republish KB");
+        String docId = createDocument(kbId, "Leave Policy", "Annual leave policy. Approval process.");
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted());
+        assertThat(indexOutboxService.processNextPendingEvent()).isTrue();
+
+        Long batchesAfterSync = (long) FakeEmbeddingConfig.batchSizes().size();
+        Long vectorRowsAfterSync = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        mockMvc.perform(post("/api/documents/{docId}/publish", docId))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.indexStatus").value("SYNCED"))
+                .andExpect(jsonPath("$.eventId").doesNotExist())
+                .andExpect(jsonPath("$.message").value("Document is already published and indexed."));
+
+        // No new outbox event, no consumer work, no additional embedding batches or vector rows.
+        assertThat(indexOutboxService.processNextPendingEvent()).isFalse();
+        Long publishEvents = jdbcClient.sql("""
+                SELECT COUNT(*)
+                FROM document_publish_events
+                WHERE doc_id = :docId AND doc_version = 1 AND event_type = 'PUBLISH'
+                """)
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+        Long vectorRowsAfterRepublish = jdbcClient.sql("SELECT COUNT(*) FROM vector_store WHERE doc_id = :docId AND doc_version = 1")
+                .param("docId", docId)
+                .query(Long.class)
+                .single();
+
+        assertThat(publishEvents).isEqualTo(1);
+        assertThat((long) FakeEmbeddingConfig.batchSizes().size()).isEqualTo(batchesAfterSync);
+        assertThat(vectorRowsAfterRepublish).isEqualTo(vectorRowsAfterSync);
+    }
+
+    @Test
     void publishRejectsDocumentWithoutReadyIngestTask() throws Exception {
         String kbId = createKnowledgeBase("Broken KB");
         String docId = "doc-without-ready-task";

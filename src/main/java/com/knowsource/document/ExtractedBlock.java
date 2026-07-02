@@ -8,10 +8,11 @@ public record ExtractedBlock(
         String chunkType,
         Integer blockIndex,
         List<String> sectionPath,
-        String tableCaption) {
+        String tableCaption,
+        ExtractedTable table) {
 
     public ExtractedBlock(String content, Integer pageNumber, String chunkType) {
-        this(content, pageNumber, chunkType, null, List.of(), null);
+        this(content, pageNumber, chunkType, null, List.of(), null, null);
     }
 
     public ExtractedBlock {

@@ -35,15 +35,22 @@ const kbId = computed(() => (typeof route.params.kbId === 'string' ? route.param
 const workspacePath = computed(() => (kbId.value ? `/kbs/${kbId.value}` : '/kbs'))
 const routeTab = computed(() => String(route.query.tab || 'documents'))
 const isGlobalViewer = computed(() => auth.globalRole === 'VIEWER')
+const canManageKbs = computed(() => auth.globalRole === 'ADMIN' || auth.globalRole === 'EDITOR')
 
 const navItems = computed<ConsoleNavItem[]>(() => [
+  {
+    label: '我的知识库',
+    section: 'NAVIGATION',
+    icon: Collection,
+    to: '/kbs',
+    exactPath: '/kbs',
+  },
   {
     label: '知识库管理',
     section: 'NAVIGATION',
     icon: Document,
-    to: kbId.value ? { path: workspacePath.value, query: { tab: 'documents' } } : '/kbs',
-    tabs: ['documents'],
-    exactPath: '/kbs',
+    to: '/manage-kbs',
+    exactPath: '/manage-kbs',
   },
   {
     label: '知识库问答',
@@ -99,11 +106,20 @@ const navSections = computed(() => {
 })
 
 function isVisible(item: ConsoleNavItem) {
-  return !(isGlobalViewer.value && item.section === 'SYSTEM')
+  if (item.label === '知识库管理' && !canManageKbs.value) {
+    return false
+  }
+  if (item.section === 'SYSTEM' && auth.globalRole !== 'ADMIN') {
+    return false
+  }
+  return true
 }
 
 const pageTitle = computed(() => {
   if (route.path === '/kbs') {
+    return '我的知识库'
+  }
+  if (route.path === '/manage-kbs') {
     return '知识库管理'
   }
   if (route.path === '/admin/users') {
@@ -121,7 +137,10 @@ const pageTitle = computed(() => {
 
 const pageDescription = computed(() => {
   if (route.path === '/kbs') {
-    return '选择一个知识库进入工作台，继续完成上传、发布、问答和问答追踪复盘。'
+    return '查看你参与的所有知识库，选择进入工作台进行问答和文档查阅。'
+  }
+  if (route.path === '/manage-kbs') {
+    return '管理你有权限的知识库：创建、编辑、删除和成员协作。'
   }
   if (route.path === '/admin/users') {
     return '管理系统用户、全局角色和演示账号权限。'
@@ -140,10 +159,13 @@ const userInitial = computed(() => (auth.username || 'U').slice(0, 1).toUpperCas
 const userRoleClass = computed(() => `role-${(auth.globalRole || 'VIEWER').toLowerCase()}`)
 
 function isActive(item: ConsoleNavItem) {
-  if (item.exactPath === '/admin/users' && route.path === '/admin/users') {
+  if (item.exactPath === '/manage-kbs' && route.path === '/manage-kbs') {
     return true
   }
   if (item.exactPath === '/kbs' && route.path === '/kbs') {
+    return true
+  }
+  if (item.exactPath === '/admin/users' && route.path === '/admin/users') {
     return true
   }
   if (kbId.value && item.tabs?.includes(routeTab.value)) {

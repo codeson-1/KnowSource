@@ -34,7 +34,7 @@ async function submit() {
     <section class="auth-copy">
       <p class="brand">KnowSource</p>
       <h1>创建演示账号</h1>
-      <p>注册用户默认是 VIEWER，可用于验证只读问答链路。上传、发布等写操作需要 EDITOR、OWNER 或 ADMIN 权限。</p>
+      <p>注册用户默认是 VIEWER，可进入已授权知识库；知识库创建由 ADMIN 控制，上传、发布等写操作由全局 ADMIN 或知识库 OWNER/EDITOR 控制。</p>
     </section>
 
     <section class="auth-panel">

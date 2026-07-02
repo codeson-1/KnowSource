@@ -4,6 +4,8 @@ export type DocumentStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED'
 export type IndexStatus = 'NONE' | 'PENDING' | 'SYNCING' | 'SYNCED' | 'FAILED'
 export type IngestStatus = 'PENDING' | 'PARSING' | 'READY' | 'FAILED'
 export type RagProfile = 'auto' | 'naive' | 'modular'
+export type RetrievalMode = 'vector' | 'lexical' | 'hybrid'
+export type RetrievalSource = 'VECTOR' | 'LEXICAL' | 'BOTH'
 
 export interface AuthResponse {
   accessToken: string
@@ -27,7 +29,7 @@ export interface KnowledgeBaseResponse {
   description: string | null
   ownerId: number
   createdAt: string
-  memberRole: MemberRole
+  memberRole: MemberRole | null
 }
 
 export interface KnowledgeBaseMemberResponse {
@@ -55,6 +57,22 @@ export interface DocumentResponse {
   parentChunkCount: number
   childChunkCount: number
   latestFailedIndexEventId: string | null
+  qualityReport: DocumentQualityReportResponse
+}
+
+export interface DocumentQualityReportResponse {
+  pageCount: number
+  extractedPageCount: number
+  emptyPageCount: number
+  tableCount: number
+  structuredTableCount: number
+  failedPageCount: number
+  ocrRequiredPageCount: number
+  ocrAppliedPageCount: number
+  emptyPages: number[]
+  failedPages: number[]
+  ocrRequiredPages: number[]
+  warnings: string[]
 }
 
 export interface DocumentIngestResponse {
@@ -74,6 +92,13 @@ export interface DocumentChunkResponse {
   chunkIndex: number
   pageNumber: number | null
   chunkType: string
+  sectionPath: string[]
+  tableCaption: string | null
+  startOffset: number | null
+  endOffset: number | null
+  tableMarkdown: string | null
+  tableRowCount: number | null
+  tableColumnCount: number | null
 }
 
 export interface DocumentPublishResponse {
@@ -102,6 +127,12 @@ export interface SourceCitation {
   pageNumber: number | null
   snippet: string
   score: number
+  retrievalSource?: RetrievalSource
+  vectorRank?: number | null
+  lexicalRank?: number | null
+  vectorScore?: number | null
+  lexicalScore?: number | null
+  fusionScore?: number
 }
 
 export interface ChatStreamDone {
@@ -111,8 +142,15 @@ export interface ChatStreamDone {
   question: string
   rewrittenQuery: string | null
   ragProfile: Exclude<RagProfile, 'auto'>
+  retrievalMode: RetrievalMode
   refused: boolean
   answer: string
+}
+
+export interface ChatStreamError {
+  code: number
+  message: string
+  qaTraceId: string | null
 }
 
 export interface ChatSessionSummaryResponse {
@@ -179,6 +217,7 @@ export interface ChatRequest {
   topK?: number
   profile: RagProfile
   sessionId?: string | null
+  retrievalMode?: RetrievalMode
 }
 
 export interface EvalSummaryResponse {

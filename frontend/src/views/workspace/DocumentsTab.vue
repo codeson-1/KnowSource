@@ -76,7 +76,7 @@ const form = reactive({
 })
 
 const canWrite = computed(
-  () => auth.canWrite || props.currentMemberRole === 'OWNER' || props.currentMemberRole === 'EDITOR',
+  () => auth.globalRole === 'ADMIN' || props.currentMemberRole === 'OWNER' || props.currentMemberRole === 'EDITOR',
 )
 const busyDocs = computed(() =>
   documents.value.filter(
@@ -110,6 +110,12 @@ const searchableCount = computed(() => documents.value.filter(searchable).length
 const failedDocumentCount = computed(
   () => documents.value.filter((doc) => doc.indexStatus === 'FAILED' || doc.latestIngestStatus === 'FAILED').length,
 )
+const documentsNeedingOcr = computed(
+  () => documents.value.filter((doc) => (doc.qualityReport?.ocrRequiredPageCount || 0) > 0).length,
+)
+const structuredTableCount = computed(() =>
+  documents.value.reduce((sum, doc) => sum + (doc.qualityReport?.structuredTableCount || 0), 0),
+)
 const documentStats = computed(() => [
   {
     label: '可检索',
@@ -124,6 +130,20 @@ const documentStats = computed(() => [
     hint: failedDocumentCount.value ? '需要重试入库或重试索引' : '当前没有失败文件',
     tone: 'danger',
     icon: Warning,
+  },
+  {
+    label: '结构化表格',
+    value: String(structuredTableCount.value),
+    hint: '表格按行列保留，避免混入普通段落',
+    tone: 'warning',
+    icon: DocumentAdd,
+  },
+  {
+    label: '需 OCR 页',
+    value: String(documentsNeedingOcr.value),
+    hint: documentsNeedingOcr.value ? '扫描页已被识别，可开启本地 OCR 重跑' : '当前没有扫描页告警',
+    tone: 'info',
+    icon: Search,
   },
 ])
 
@@ -371,6 +391,42 @@ function formatDate(value: string | null) {
   return value ? new Date(value).toLocaleString() : '-'
 }
 
+function qualityTone(doc: DocumentResponse) {
+  const report = doc.qualityReport
+  if (!report || (!report.pageCount && !report.tableCount)) {
+    return 'info'
+  }
+  if (report.failedPageCount || report.ocrRequiredPageCount) {
+    return 'warning'
+  }
+  return 'success'
+}
+
+function qualityLabel(doc: DocumentResponse) {
+  const report = doc.qualityReport
+  if (!report || (!report.pageCount && !report.tableCount)) {
+    return '文本'
+  }
+  const parts = []
+  if (report.pageCount) {
+    parts.push(`${report.extractedPageCount}/${report.pageCount}页`)
+  }
+  if (report.structuredTableCount) {
+    parts.push(`${report.structuredTableCount}表`)
+  }
+  if (report.ocrRequiredPageCount) {
+    parts.push(`${report.ocrRequiredPageCount}页OCR`)
+  }
+  if (report.failedPageCount) {
+    parts.push(`${report.failedPageCount}页失败`)
+  }
+  return parts.join(' · ') || '正常'
+}
+
+function formatPages(pages: number[]) {
+  return pages.length ? pages.join(', ') : '-'
+}
+
 onMounted(load)
 onBeforeUnmount(() => {
   if (pollTimer.value) {
@@ -431,7 +487,7 @@ onBeforeUnmount(() => {
     </div>
     <el-alert
       v-if="!canWrite"
-      title="当前用户不是全局 ADMIN/EDITOR，也不是该知识库 OWNER/EDITOR，写操作入口已禁用。"
+      title="当前用户不是全局 ADMIN，也不是该知识库 OWNER/EDITOR，写操作入口已禁用。"
       type="info"
       :closable="false"
       style="margin-bottom: 12px"
@@ -458,6 +514,11 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="切块" width="110" align="center">
         <template #default="{ row }">{{ row.parentChunkCount }} / {{ row.childChunkCount }}</template>
+      </el-table-column>
+      <el-table-column label="质量报告" width="150" align="center">
+        <template #default="{ row }">
+          <span class="status-tag" :class="qualityTone(row)">{{ qualityLabel(row) }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="检索可用" width="118" align="center">
         <template #default="{ row }"><StatusTag :value="searchable(row) ? '可检索' : '不可检索'" kind="available" /></template>
@@ -561,7 +622,27 @@ onBeforeUnmount(() => {
         <div class="metric"><span>索引状态</span><strong>{{ selectedDoc.indexStatus }}</strong></div>
         <div class="metric"><span>入库任务</span><strong>{{ selectedTask?.ingestStatus || '-' }}</strong></div>
         <div class="metric"><span>切块</span><strong>{{ selectedTask?.parentChunkCount ?? 0 }} / {{ selectedTask?.childChunkCount ?? chunks.length }}</strong></div>
+        <div class="metric"><span>页数抽取</span><strong>{{ selectedDoc.qualityReport.extractedPageCount }} / {{ selectedDoc.qualityReport.pageCount || '-' }}</strong></div>
+        <div class="metric"><span>结构化表格</span><strong>{{ selectedDoc.qualityReport.structuredTableCount }} / {{ selectedDoc.qualityReport.tableCount }}</strong></div>
       </div>
+
+      <section class="quality-report-panel">
+        <div class="section-heading compact">
+          <div>
+            <h3>解析质量报告</h3>
+            <p>页级抽取、扫描页、表格结构化和失败页会在这里汇总。</p>
+          </div>
+        </div>
+        <div class="quality-report-grid">
+          <div><span>空页</span><strong>{{ selectedDoc.qualityReport.emptyPageCount }}</strong><small>{{ formatPages(selectedDoc.qualityReport.emptyPages) }}</small></div>
+          <div><span>失败页</span><strong>{{ selectedDoc.qualityReport.failedPageCount }}</strong><small>{{ formatPages(selectedDoc.qualityReport.failedPages) }}</small></div>
+          <div><span>需 OCR</span><strong>{{ selectedDoc.qualityReport.ocrRequiredPageCount }}</strong><small>{{ formatPages(selectedDoc.qualityReport.ocrRequiredPages) }}</small></div>
+          <div><span>OCR 成功</span><strong>{{ selectedDoc.qualityReport.ocrAppliedPageCount }}</strong><small>本地 OCR 开关开启后统计</small></div>
+        </div>
+        <div v-if="selectedDoc.qualityReport.warnings.length" class="quality-warning-list">
+          <span v-for="warning in selectedDoc.qualityReport.warnings" :key="warning">{{ warning }}</span>
+        </div>
+      </section>
 
       <el-descriptions :column="2" border style="margin-top: 14px">
         <el-descriptions-item label="文件类型">{{ selectedDoc.fileType || '-' }}</el-descriptions-item>
@@ -596,6 +677,15 @@ onBeforeUnmount(() => {
             </el-button>
           </div>
           <p>{{ chunk.content }}</p>
+          <div v-if="chunk.sectionPath.length || chunk.tableMarkdown" class="chunk-meta-grid">
+            <span v-if="chunk.sectionPath.length">章节：{{ chunk.sectionPath.join(' > ') }}</span>
+            <span v-if="chunk.tableCaption">表格：{{ chunk.tableCaption }}</span>
+            <span v-if="chunk.startOffset !== null && chunk.endOffset !== null">偏移：{{ chunk.startOffset }}-{{ chunk.endOffset }}</span>
+            <span v-if="chunk.tableRowCount !== null && chunk.tableColumnCount !== null">
+              行列：{{ chunk.tableRowCount }} × {{ chunk.tableColumnCount }}
+            </span>
+          </div>
+          <pre v-if="chunk.tableMarkdown" class="table-markdown">{{ chunk.tableMarkdown }}</pre>
           <small class="muted">chunkId {{ chunk.id }} / parent {{ chunk.parentChunkId }}</small>
         </article>
       </div>

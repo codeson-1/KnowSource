@@ -23,10 +23,15 @@ const kb = ref<KnowledgeBaseResponse | null>(null)
 const members = ref<KnowledgeBaseMemberResponse[]>([])
 const loading = ref(false)
 const allowedTabs = ['documents', 'chat', 'members', 'traces', 'evaluation']
-const activeTab = ref(allowedTabs.includes(String(route.query.tab)) ? String(route.query.tab) : 'documents')
+const defaultTab = computed(() => (route.query.from === 'manage' ? 'documents' : 'chat'))
+const activeTab = ref(allowedTabs.includes(String(route.query.tab)) ? String(route.query.tab) : defaultTab.value)
 const traceRefreshKey = ref(0)
 
 const kbId = computed(() => String(route.params.kbId))
+const backToListPath = computed(() => {
+  const from = route.query.from as string
+  return from === 'manage' ? '/manage-kbs' : '/kbs'
+})
 const currentMemberRole = computed<MemberRole | null>(() => {
   const userId = auth.userId
   return members.value.find((member) => member.userId === userId)?.memberRole || null
@@ -56,8 +61,8 @@ watch(kbId, loadKb)
 watch(
   () => route.query.tab,
   (tab) => {
-    const next = String(tab || 'documents')
-    activeTab.value = allowedTabs.includes(next) ? next : 'documents'
+    const next = String(tab || defaultTab.value)
+    activeTab.value = allowedTabs.includes(next) ? next : defaultTab.value
   },
 )
 watch(activeTab, (tab) => {
@@ -81,7 +86,7 @@ onMounted(loadKb)
               <p>{{ kb.description || '这个知识库还没有描述。' }}</p>
             </div>
             <div class="toolbar-inline">
-              <el-button :icon="ArrowLeft" plain @click="router.push('/kbs')">返回列表</el-button>
+              <el-button :icon="ArrowLeft" plain @click="router.push(backToListPath)">返回列表</el-button>
               <span class="status-tag">成员角色 {{ currentMemberRole || '-' }}</span>
             </div>
           </div>

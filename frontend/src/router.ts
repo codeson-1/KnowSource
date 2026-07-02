@@ -8,7 +8,8 @@ export const router = createRouter({
     { path: '/', redirect: '/kbs' },
     { path: '/login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     { path: '/register', component: () => import('@/views/RegisterView.vue'), meta: { public: true } },
-    { path: '/kbs', component: () => import('@/views/KbListView.vue') },
+    { path: '/kbs', component: () => import('@/views/KbListView.vue'), meta: { mode: 'mine' } },
+    { path: '/manage-kbs', component: () => import('@/views/KbListView.vue'), meta: { mode: 'manage' } },
     { path: '/kbs/:kbId', component: () => import('@/views/WorkspaceView.vue') },
     { path: '/admin/users', component: () => import('@/views/AdminUsersPlaceholder.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/kbs' },
@@ -24,6 +25,9 @@ router.beforeEach((to) => {
     return '/kbs'
   }
   if (to.path === '/admin/users' && auth.globalRole !== 'ADMIN') {
+    return '/kbs'
+  }
+  if (to.path === '/manage-kbs' && auth.globalRole !== 'ADMIN' && auth.globalRole !== 'EDITOR') {
     return '/kbs'
   }
   return true

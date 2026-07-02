@@ -784,6 +784,56 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.quality-report-panel {
+  margin-top: 14px;
+  border: 1px solid var(--ks-line);
+  border-radius: var(--ks-radius);
+  background: var(--ks-surface-2);
+  padding: 12px;
+}
+
+.quality-report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.quality-report-grid > div {
+  display: grid;
+  gap: 4px;
+  min-height: 76px;
+  border: 1px solid var(--ks-line);
+  border-radius: var(--ks-radius);
+  background: var(--ks-surface);
+  padding: 10px;
+}
+
+.quality-report-grid span,
+.quality-report-grid small {
+  color: var(--ks-muted);
+  font-size: 12px;
+}
+
+.quality-report-grid strong {
+  color: var(--ks-ink);
+  font-size: 18px;
+}
+
+.quality-warning-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.quality-warning-list span {
+  border: 1px solid oklch(0.89 0.06 78);
+  border-radius: var(--ks-radius);
+  background: var(--ks-warning-bg);
+  color: var(--ks-warning-text);
+  padding: 7px 9px;
+  font-size: 12px;
+}
+
 .eval-report-panel {
   align-self: start;
 }
@@ -922,6 +972,35 @@ h3 {
 .trace-card p {
   margin-top: 6px;
   color: var(--ks-muted);
+}
+
+.chunk-meta-grid {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.chunk-meta-grid span {
+  border-radius: 999px;
+  background: var(--ks-info-bg);
+  color: var(--ks-info-text);
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.table-markdown {
+  overflow: auto;
+  max-height: 180px;
+  margin: 10px 0 0;
+  border: 1px solid var(--ks-line);
+  border-radius: var(--ks-radius);
+  background: var(--ks-surface-2);
+  color: var(--ks-ink);
+  padding: 10px;
+  white-space: pre;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .source-item small,

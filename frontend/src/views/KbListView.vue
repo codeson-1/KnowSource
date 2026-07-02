@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Edit, Plus, Refresh } from '@element-plus/icons-vue'
 
-import { createKb, deleteKb, listKbs, updateKb } from '@/api/kbs'
+import { createKb, deleteKb, listKbs, listManageableKbs, updateKb } from '@/api/kbs'
 import { extractErrorMessage } from '@/api/http'
 import ConsoleLayout from '@/layouts/ConsoleLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { KnowledgeBaseResponse } from '@/types/api'
 
+const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const pageMode = computed(() => (route.meta.mode as string) || 'mine')
 const loading = ref(false)
 const creating = ref(false)
 const createDialogVisible = ref(false)
@@ -41,7 +43,7 @@ function openCreateDialog() {
 async function load() {
   loading.value = true
   try {
-    kbs.value = await listKbs()
+    kbs.value = pageMode.value === 'manage' ? await listManageableKbs() : await listKbs()
   } catch (error) {
     ElMessage.error(extractErrorMessage(error))
   } finally {
@@ -60,7 +62,7 @@ async function submit() {
     ElMessage.success('知识库已创建')
     createDialogVisible.value = false
     resetCreateForm()
-    await router.push(`/kbs/${kb.id}`)
+    await router.push(`/kbs/${kb.id}?from=${pageMode.value}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error))
   } finally {
@@ -121,6 +123,11 @@ function canManageKb(kb: KnowledgeBaseResponse) {
   return auth.globalRole === 'ADMIN' || kb.memberRole === 'OWNER'
 }
 
+function roleLabel(kb: KnowledgeBaseResponse) {
+  if (kb.memberRole) return kb.memberRole
+  return auth.globalRole === 'ADMIN' ? '管理员' : '—'
+}
+
 function roleTone(role: KnowledgeBaseResponse['memberRole']) {
   if (role === 'OWNER') {
     return 'success'
@@ -132,6 +139,7 @@ function roleTone(role: KnowledgeBaseResponse['memberRole']) {
 }
 
 onMounted(load)
+watch(pageMode, load)
 </script>
 
 <template>
@@ -140,11 +148,11 @@ onMounted(load)
       <section class="content">
         <div class="kb-hero">
           <div>
-            <h2>知识库列表</h2>
-            <p>选择一个知识库进入工作台，继续完成上传、发布、问答和问答追踪复盘。</p>
+            <h2>{{ pageMode === 'manage' ? '知识库管理' : '我的知识库' }}</h2>
+            <p>{{ pageMode === 'manage' ? '管理你有权限的知识库：创建、编辑、删除和成员协作。' : '查看你参与的所有知识库，选择进入工作台进行问答和文档查阅。' }}</p>
           </div>
           <div class="toolbar-inline">
-            <el-button type="primary" :icon="Plus" :disabled="!auth.canWrite" @click="openCreateDialog">
+            <el-button v-if="pageMode === 'manage' && (auth.globalRole === 'ADMIN' || auth.globalRole === 'EDITOR')" type="primary" :icon="Plus" @click="openCreateDialog">
               创建知识库
             </el-button>
             <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -152,22 +160,14 @@ onMounted(load)
         </div>
 
         <section class="panel">
-          <el-alert
-            v-if="!auth.canWrite"
-            title="全局 VIEWER 不能创建知识库；你仍可进入已授权知识库，具体操作由每个知识库的成员角色决定。"
-            type="info"
-            show-icon
-            :closable="false"
-            style="margin-bottom: 12px"
-          />
-          <el-skeleton v-if="loading" :rows="5" animated />
+          <el-skeleton v-if="loading && !kbs.length" :rows="5" animated />
           <el-empty v-else-if="!kbs.length" description="暂无可访问知识库" />
-          <el-table v-else :data="kbs" stripe>
+          <el-table v-else :data="kbs" stripe v-loading="loading">
             <el-table-column prop="name" label="名称" min-width="180" />
             <el-table-column prop="description" label="描述" min-width="260" show-overflow-tooltip />
             <el-table-column label="当前角色" width="130" align="center">
               <template #default="{ row }">
-                <span class="status-tag" :class="roleTone(row.memberRole)">{{ row.memberRole }}</span>
+                <span class="status-tag" :class="roleTone(row.memberRole)">{{ roleLabel(row) }}</span>
               </template>
             </el-table-column>
             <el-table-column label="创建时间" width="190" align="center">
@@ -175,7 +175,7 @@ onMounted(load)
             </el-table-column>
             <el-table-column label="操作" width="220" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button type="primary" link @click="router.push(`/kbs/${row.id}`)">进入</el-button>
+                <el-button type="primary" link @click="router.push(`/kbs/${row.id}?from=${pageMode}`)">进入</el-button>
                 <template v-if="canManageKb(row)">
                   <el-button type="primary" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
                   <el-button type="danger" link :icon="Delete" @click="remove(row)">删除</el-button>

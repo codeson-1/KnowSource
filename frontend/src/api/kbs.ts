@@ -6,6 +6,11 @@ export async function listKbs() {
   return data
 }
 
+export async function listManageableKbs() {
+  const { data } = await http.get<KnowledgeBaseResponse[]>('/kbs/manageable')
+  return data
+}
+
 export async function createKb(payload: { name: string; description?: string }) {
   const { data } = await http.post<KnowledgeBaseResponse>('/kbs', payload)
   return data

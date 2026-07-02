@@ -8,14 +8,20 @@ export const http = axios.create({
   timeout: 30000,
 })
 
-let refreshing: Promise<boolean> | null = null
+const AUTH_ENDPOINTS_WITHOUT_REFRESH = new Set([
+  '/auth/login',
+  '/auth/register',
+  '/auth/refresh',
+  '/auth/logout',
+])
 
 const ERROR_MESSAGE_TRANSLATIONS: Record<string, string> = {
   'Knowledge base must keep at least one OWNER.': '知识库必须至少保留一名 OWNER。',
   'Knowledge base member not found.': '知识库成员不存在。',
   'Knowledge base not found.': '知识库不存在或当前账号不可访问。',
   'Knowledge base owner access is required.': '只有知识库 OWNER 可以执行该操作。',
-  'Knowledge base creation requires ADMIN or EDITOR access.': '创建知识库需要 ADMIN 或 EDITOR 权限。',
+  'Knowledge base creation requires ADMIN access.': '创建知识库需要 ADMIN 权限。',
+  'Global role must be ADMIN or VIEWER.': '全局角色必须是 ADMIN 或 VIEWER。',
   'Username is required.': '请输入用户名。',
   'Member role is required.': '请选择成员角色。',
   'Member role must be OWNER, EDITOR, or VIEWER.': '成员角色必须是 OWNER、EDITOR 或 VIEWER。',
@@ -37,12 +43,13 @@ http.interceptors.response.use(
     const auth = useAuthStore()
     const config = error.config as (InternalAxiosRequestConfig & { _retried?: boolean }) | undefined
 
-    if (error.response?.status === 401 && config && !config._retried && auth.refreshToken) {
+    if (error.response?.status === 401
+      && config
+      && !config._retried
+      && !isAuthEndpointWithoutRefresh(config.url)
+      && auth.refreshToken) {
       config._retried = true
-      refreshing ||= auth.refresh().finally(() => {
-        refreshing = null
-      })
-      const ok = await refreshing
+      const ok = await auth.refresh()
       if (ok) {
         return http(config)
       }
@@ -92,4 +99,14 @@ function translateServerMessage(message: string): string {
 
 export function showError(error: unknown) {
   ElMessage.error(extractErrorMessage(error))
+}
+
+function isAuthEndpointWithoutRefresh(url?: string) {
+  if (!url) {
+    return false
+  }
+  const pathname = url.startsWith('http')
+    ? new URL(url).pathname.replace(/^\/api/, '')
+    : url.replace(/^\/api/, '').split('?')[0]
+  return AUTH_ENDPOINTS_WITHOUT_REFRESH.has(pathname)
 }

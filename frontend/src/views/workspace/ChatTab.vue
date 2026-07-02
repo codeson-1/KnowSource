@@ -20,6 +20,7 @@ import type {
   ChatSessionMessageResponse,
   ChatSessionSummaryResponse,
   ChatStreamDone,
+  ChatStreamError,
   RagProfile,
   SourceCitation,
 } from '@/types/api'
@@ -317,7 +318,10 @@ async function send() {
 
   try {
     let answer = ''
-    const streamState: { done: ChatStreamDone | null } = { done: null }
+    const streamState: { done: ChatStreamDone | null; error: ChatStreamError | null } = {
+      done: null,
+      error: null,
+    }
     await streamChat(
       props.kbId,
       {
@@ -352,8 +356,23 @@ async function send() {
           void refreshSessions()
           emit('traced')
         },
+        onError(error) {
+          streamState.error = error
+        },
       },
     )
+    if (streamState.error) {
+      typewriter.stop()
+      const message = streamState.error.message || '回答生成失败，请稍后重试。'
+      updateMessage(assistantId, {
+        content: message,
+        qaTraceId: streamState.error.qaTraceId,
+        sources: [],
+      })
+      activeEvidenceMessageId.value = null
+      ElMessage.error(message)
+      return
+    }
     await typewriter.finish()
     const donePayload = streamState.done
     if (donePayload) {

@@ -1,10 +1,11 @@
 import { useAuthStore } from '@/stores/auth'
-import type { ChatRequest, ChatStreamDone, SourceCitation } from '@/types/api'
+import type { ChatRequest, ChatStreamDone, ChatStreamError, SourceCitation } from '@/types/api'
 
 interface StreamHandlers {
   onSources?: (sources: SourceCitation[]) => void
   onToken?: (token: string) => void
   onDone?: (done: ChatStreamDone) => void
+  onError?: (error: ChatStreamError) => void
 }
 
 export async function streamChat(kbId: string, request: ChatRequest, handlers: StreamHandlers) {
@@ -69,6 +70,8 @@ function dispatchFrame(frame: string, handlers: StreamHandlers) {
     handlers.onToken?.(parseJsonOrText(event.data))
   } else if (event.name === 'done') {
     handlers.onDone?.(JSON.parse(event.data) as ChatStreamDone)
+  } else if (event.name === 'error') {
+    handlers.onError?.(JSON.parse(event.data) as ChatStreamError)
   }
 }
 

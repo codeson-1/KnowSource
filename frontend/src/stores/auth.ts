@@ -5,6 +5,8 @@ import type { AuthResponse, GlobalRole } from '@/types/api'
 
 const STORAGE_KEY = 'knowsource.frontend.auth'
 
+let refreshRequest: Promise<boolean> | null = null
+
 interface AuthState {
   accessToken: string | null
   refreshToken: string | null
@@ -39,7 +41,7 @@ export const useAuthStore = defineStore('auth', {
   state: (): AuthState => readStoredAuth(),
   getters: {
     isAuthenticated: (state) => Boolean(state.accessToken),
-    canWrite: (state) => state.globalRole === 'ADMIN' || state.globalRole === 'EDITOR',
+    canWrite: (state) => state.globalRole === 'ADMIN',
   },
   actions: {
     setAuth(auth: AuthResponse) {
@@ -61,11 +63,28 @@ export const useAuthStore = defineStore('auth', {
         this.clear()
         return false
       }
+      refreshRequest ||= this.refreshOnce().finally(() => {
+        refreshRequest = null
+      })
+      return refreshRequest
+    },
+    async refreshOnce() {
+      const refreshToken = this.refreshToken
+      if (!refreshToken) {
+        this.clear()
+        return false
+      }
       try {
-        this.setAuth(await authApi.refresh(this.refreshToken))
+        const nextAuth = await authApi.refresh(refreshToken)
+        if (this.refreshToken !== refreshToken) {
+          return Boolean(this.refreshToken)
+        }
+        this.setAuth(nextAuth)
         return true
       } catch {
-        this.clear()
+        if (this.refreshToken === refreshToken) {
+          this.clear()
+        }
         return false
       }
     },

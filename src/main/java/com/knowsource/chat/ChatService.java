@@ -62,7 +62,7 @@ public class ChatService {
     private final JdbcClient jdbcClient;
     private final CurrentUserService currentUserService;
     private final RagProfileRouter ragProfileRouter;
-    private final VectorSearchService vectorSearchService;
+    private final RetrievalService retrievalService;
     private final ObjectProvider<AnswerGenerator> answerGeneratorProvider;
     private final ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider;
     private final ObjectProvider<AsyncTaskExecutor> taskExecutorProvider;
@@ -75,7 +75,7 @@ public class ChatService {
             JdbcClient jdbcClient,
             CurrentUserService currentUserService,
             RagProfileRouter ragProfileRouter,
-            VectorSearchService vectorSearchService,
+            RetrievalService retrievalService,
             ObjectProvider<AnswerGenerator> answerGeneratorProvider,
             ObjectProvider<StreamingAnswerGenerator> streamingAnswerGeneratorProvider,
             @Qualifier("chatExecutor") ObjectProvider<AsyncTaskExecutor> taskExecutorProvider,
@@ -86,7 +86,7 @@ public class ChatService {
         this.jdbcClient = jdbcClient;
         this.currentUserService = currentUserService;
         this.ragProfileRouter = ragProfileRouter;
-        this.vectorSearchService = vectorSearchService;
+        this.retrievalService = retrievalService;
         this.answerGeneratorProvider = answerGeneratorProvider;
         this.streamingAnswerGeneratorProvider = streamingAnswerGeneratorProvider;
         this.taskExecutorProvider = taskExecutorProvider;
@@ -103,7 +103,7 @@ public class ChatService {
             chatSessionService.appendAssistantMessage(context.sessionId(), context.fallbackAnswer(), context.traceId());
             return new ChatResponse(
                     context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
-                    context.ragProfile().value(),
+                    context.ragProfile().value(), context.retrievalMode(),
                     context.fallbackAnswer(), true,
                     context.sources());
         }
@@ -114,6 +114,7 @@ public class ChatService {
                     "Answer generator is not available. Configure a model API key to enable LLM answers.");
         }
         long llmStartedAt = System.nanoTime();
+        // P1-1: use rewritten query (retrieval query) rather than original question for generation
         String answer = generateAnswer(answerGenerator, context);
         int llmMs = elapsedMillis(llmStartedAt);
         qaTraceService.recordAsync(traceRecord(context, answer, llmMs, null));
@@ -121,7 +122,7 @@ public class ChatService {
         boolean llmRefused = isLlmRefusal(answer);
         return new ChatResponse(
                 context.traceId(), context.sessionId(), context.kbId(), context.question(), context.rewrittenQuery(),
-                context.ragProfile().value(),
+                context.ragProfile().value(), context.retrievalMode(),
                 answer, llmRefused, llmRefused ? List.of() : context.sources());
     }
 
@@ -134,7 +135,12 @@ public class ChatService {
         if (taskExecutor == null) {
             task.run();
         } else {
-            taskExecutor.execute(task);
+            // P1-3: catch TaskRejectedException and send error event instead of letting it propagate
+            try {
+                taskExecutor.execute(task);
+            } catch (org.springframework.core.task.TaskRejectedException ex) {
+                sendTaskRejectedError(emitter, context);
+            }
         }
 
         return emitter;
@@ -153,7 +159,7 @@ public class ChatService {
             String traceId = UUID.randomUUID().toString();
             return new ChatContext(
                     traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, question,
-                    null, 0, ragProfile, true, List.of(),
+                    null, 0, ragProfile, effectiveRetrievalMode(request).value(), true, List.of(),
                     conversationalAnswer,
                     0);
         }
@@ -161,14 +167,17 @@ public class ChatService {
         chatSessionService.appendUserMessage(sessionHistory.sessionId(), question);
 
         long retrievalStartedAt = System.nanoTime();
-        List<RetrievedChunk> chunks = vectorSearchService.search(kbId, rewriteResult.retrievalQueries(), request.topK());
+        RetrievalMode retrievalMode = effectiveRetrievalMode(request);
+        List<RetrievedChunk> chunks = retrievalService.search(
+                kbId, rewriteResult.retrievalQueries(), request.topK(), retrievalMode.value());
         int retrievalMs = elapsedMillis(retrievalStartedAt);
         recordRetrieval(kbId, ragProfile, retrievalMs);
         String traceId = UUID.randomUUID().toString();
         if (chunks.isEmpty() || !hasLexicalEvidence(rewriteResult.retrievalQueries(), chunks)) {
             return new ChatContext(
                     traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, rewriteResult.query(),
-                    rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, true, List.of(),
+                    rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, retrievalMode.value(),
+                    true, List.of(),
                     EMPTY_CONTEXT_ANSWER,
                     retrievalMs);
         }
@@ -176,7 +185,8 @@ public class ChatService {
         List<SourceCitation> sources = toSources(chunks);
         return new ChatContext(
                 traceId, sessionHistory.sessionId(), userId, startedAt, kbId, question, rewriteResult.query(),
-                rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, false, sources,
+                rewriteResult.rewrittenQuery(), rewriteResult.rewriteMs(), ragProfile, retrievalMode.value(),
+                false, sources,
                 draftAnswer(sources),
                 retrievalMs);
     }
@@ -201,8 +211,9 @@ public class ChatService {
                     return;
                 }
                 try {
+                    // P1-1: use retrievalQuery (rewritten standalone question) instead of original question
                     streamingAnswerGenerator.stream(
-                            context.question(),
+                            context.retrievalQuery(),
                             context.sources(),
                             token -> sendToken(emitter, answer, token, firstTokenAt));
                 } catch (AiProviderException ex) {
@@ -223,7 +234,7 @@ public class ChatService {
                     .data(new ChatStreamDone(
                                     context.traceId(), context.sessionId(), context.kbId(), context.question(),
                                     context.rewrittenQuery(), context.ragProfile().value(),
-                                    context.refused() || llmRefused, answer.toString()),
+                                    context.retrievalMode(), context.refused() || llmRefused, answer.toString()),
                             MediaType.APPLICATION_JSON));
             emitter.complete();
         } catch (RuntimeException | java.io.IOException ex) {
@@ -234,7 +245,8 @@ public class ChatService {
 
     private static String generateAnswer(AnswerGenerator answerGenerator, ChatContext context) {
         try {
-            return answerGenerator.generate(context.question(), context.sources());
+            // P1-1: use retrievalQuery (rewritten standalone question) instead of original question
+            return answerGenerator.generate(context.retrievalQuery(), context.sources());
         } catch (AiProviderException ex) {
             return AI_BUSY_ANSWER;
         }
@@ -267,7 +279,32 @@ public class ChatService {
         }
     }
 
+    private void sendTaskRejectedError(SseEmitter emitter, ChatContext context) {
+        try {
+            qaTraceService.recordAsync(traceRecord(context, "", null, null));
+            emitter.send(SseEmitter.event()
+                    .name("error")
+                    .data(new ChatStreamError(
+                            50003,
+                            "服务繁忙，请稍后重试。",
+                            context.traceId()), MediaType.APPLICATION_JSON));
+            emitter.complete();
+        } catch (java.io.IOException ex) {
+            emitter.completeWithError(ex);
+        }
+    }
+
     private void requireKbMember(String kbId, long userId) {
+        if ("ADMIN".equals(currentUserService.currentUser().globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members
@@ -306,7 +343,13 @@ public class ChatService {
                 chunk.chunkIndex(),
                 chunk.pageNumber(),
                 snippet(chunk.content()),
-                chunk.score());
+                chunk.score(),
+                chunk.retrievalSource().name(),
+                chunk.vectorRank(),
+                chunk.lexicalRank(),
+                chunk.vectorScore(),
+                chunk.lexicalScore(),
+                chunk.fusionScore());
     }
 
     private static String snippet(String content) {
@@ -329,6 +372,10 @@ public class ChatService {
      */
     private static boolean isLlmRefusal(String answer) {
         return StringUtils.hasText(answer) && answer.trim().equals(LLM_REFUSAL_ANSWER);
+    }
+
+    private RetrievalMode effectiveRetrievalMode(ChatRequest request) {
+        return retrievalService.resolveMode(request.retrievalMode());
     }
 
     private static String conversationalAnswer(String question) {

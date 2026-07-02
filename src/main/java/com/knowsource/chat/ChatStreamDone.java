@@ -7,6 +7,7 @@ record ChatStreamDone(
         String question,
         String rewrittenQuery,
         String ragProfile,
+        String retrievalMode,
         boolean refused,
         String answer) {
 }

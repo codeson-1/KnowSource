@@ -9,6 +9,7 @@ public record ChatResponse(
         String question,
         String rewrittenQuery,
         String ragProfile,
+        String retrievalMode,
         String answer,
         boolean refused,
         List<SourceCitation> sources) {

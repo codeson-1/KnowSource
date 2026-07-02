@@ -124,6 +124,16 @@ class QaTraceService {
     }
 
     private void requireKbMember(String kbId) {
+        if ("ADMIN".equals(currentUserService.currentUser().globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         long userId = currentUserService.currentUserId();
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)

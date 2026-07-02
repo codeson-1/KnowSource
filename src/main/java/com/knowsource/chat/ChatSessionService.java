@@ -10,6 +10,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knowsource.document.ResourceNotFoundException;
+import com.knowsource.security.CurrentUserService;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -27,10 +28,12 @@ class ChatSessionService {
 
     private final JdbcClient jdbcClient;
     private final ObjectMapper objectMapper;
+    private final CurrentUserService currentUserService;
 
-    ChatSessionService(JdbcClient jdbcClient, ObjectMapper objectMapper) {
+    ChatSessionService(JdbcClient jdbcClient, ObjectMapper objectMapper, CurrentUserService currentUserService) {
         this.jdbcClient = jdbcClient;
         this.objectMapper = objectMapper;
+        this.currentUserService = currentUserService;
     }
 
     ChatSessionHistory loadOrCreate(String requestedSessionId, long userId, String kbId, String firstQuestion) {
@@ -169,6 +172,16 @@ class ChatSessionService {
     }
 
     private void requireKbMember(String kbId, long userId) {
+        if ("ADMIN".equals(currentUserService.currentUser().globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         Long membershipCount = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members

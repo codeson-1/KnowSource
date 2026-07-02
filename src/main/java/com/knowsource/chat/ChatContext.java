@@ -13,6 +13,7 @@ record ChatContext(
         String rewrittenQuery,
         int rewriteMs,
         RagProfile ragProfile,
+        String retrievalMode,
         boolean refused,
         List<SourceCitation> sources,
         String fallbackAnswer,

@@ -850,6 +850,52 @@ class ChatControllerTest {
     }
 
     @Test
+    void hybridRetrievalFindsExactKeywordWhenVectorModeMisses() throws Exception {
+        String kbId = createKnowledgeBase("Hybrid Exact Term KB");
+        String docId = createDocument(kbId, "Model Operations",
+                "Security catalog note: qwen3-rerank owner is the AI platform team.");
+        publishDocument(docId);
+
+        mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "qwen3-rerank owner",
+                                  "retrievalMode": "vector"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retrievalMode").value("vector"))
+                .andExpect(jsonPath("$.refused").value(true))
+                .andExpect(jsonPath("$.sources", hasSize(0)));
+
+        MvcResult hybrid = mockMvc.perform(post("/api/kbs/{kbId}/chat", kbId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "question": "qwen3-rerank owner",
+                                  "retrievalMode": "hybrid"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retrievalMode").value("hybrid"))
+                .andExpect(jsonPath("$.refused").value(false))
+                .andExpect(jsonPath("$.sources", hasSize(1)))
+                .andExpect(jsonPath("$.sources[0].docId").value(docId))
+                .andExpect(jsonPath("$.sources[0].retrievalSource").value("LEXICAL"))
+                .andExpect(jsonPath("$.sources[0].lexicalRank").value(1))
+                .andReturn();
+
+        String traceId = objectMapper.readTree(hybrid.getResponse().getContentAsString()).path("qaTraceId").asText();
+        waitForTrace(traceId);
+
+        mockMvc.perform(get("/api/kbs/{kbId}/qa-traces/{traceId}", kbId, traceId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retrievedChunks[0].retrievalSource").value("LEXICAL"))
+                .andExpect(jsonPath("$.retrievedChunks[0].fusionScore").isNumber());
+    }
+
+    @Test
     void rejectsBlankQuestion() throws Exception {
         String kbId = createKnowledgeBase("Validation KB");
 

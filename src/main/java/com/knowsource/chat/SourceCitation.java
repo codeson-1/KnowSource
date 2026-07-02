@@ -9,5 +9,11 @@ public record SourceCitation(
         int chunkIndex,
         Integer pageNumber,
         String snippet,
-        double score) {
+        double score,
+        String retrievalSource,
+        Integer vectorRank,
+        Integer lexicalRank,
+        Double vectorScore,
+        Double lexicalScore,
+        double fusionScore) {
 }

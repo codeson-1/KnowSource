@@ -75,7 +75,7 @@ class VectorSearchService {
         return documentReranker.rerank(normalizedQueries.getFirst(), candidates, topK);
     }
 
-    private List<RetrievedChunk> searchCandidates(String kbId, String question, int candidateLimit) {
+    List<RetrievedChunk> searchCandidates(String kbId, String question, int candidateLimit) {
         DocumentEmbeddingGateway embeddingGateway = embeddingGatewayProvider.getIfAvailable();
         if (embeddingGateway == null) {
             throw new IllegalStateException("Document embedding gateway is not available.");

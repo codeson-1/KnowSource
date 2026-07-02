@@ -593,7 +593,7 @@ Implemented route-level structure:
   - Registered users default to global `VIEWER`.
 - `/kbs`
   - List knowledge bases accessible to the current user.
-  - Create, edit, and delete knowledge bases.
+  - ADMIN can create knowledge bases; owners/admins can edit and delete knowledge bases.
   - Enter a selected knowledge base workspace.
 - `/kbs/{kbId}`
   - Main knowledge base workspace.
@@ -601,7 +601,7 @@ Implemented route-level structure:
   - Tabs organize the real work: `Documents`, `Chat`, `Members`, `QaTrace`, and `Evaluation`.
 - `/admin/users`
   - ADMIN-only system user management.
-  - List users, create users, and update global roles (`ADMIN`, `EDITOR`, `VIEWER`).
+  - List users, create users, and update global roles (`ADMIN`, `VIEWER`).
 
 Implemented workspace tabs:
 
@@ -653,9 +653,30 @@ Phased implementation target:
 Frontend-supporting backend hardening completed:
 
 - Document list includes latest ingest task status and chunk counts, avoiding per-row fan-out for the table view.
+- Document list and detail now include the latest ingest quality report, covering page counts, extracted/empty/failed pages, table counts, structured table counts, OCR-required pages, OCR-applied pages, and warnings.
 - Retry index uses `POST /api/documents/{docId}/index/retry`, so the frontend no longer has to remember an outbox event id.
 - Source preview/download is opened from an Axios blob request, so Bearer-token-only auth works for local and OSS-backed sources.
 - Golden Set report API exists and the frontend renders `report.md` with `markdown-it`; raw HTML is disabled in the Markdown renderer.
+
+## v1.1 Document Ingestion Quality Status
+
+v1.1 upgrades the ingestion story from "documents can be uploaded" to "documents are understood with measurable quality."
+
+Implemented:
+
+- Flyway `V6__ingest_quality_report.sql` extends `ingest_tasks` with parser quality summary columns and JSONB detail.
+- PDF extraction now records page count, extracted pages, empty pages, failed pages, OCR-required pages, OCR-applied pages, and warnings.
+- Scanned/image-only PDF pages are detected. Local OCR is available behind `knowsource.ingest.ocr.enabled=true` and uses the configurable `tesseract` command by default; it is disabled by default so the normal demo path has no external OCR runtime dependency.
+- Markdown pipe tables are parsed into structured rows/columns and persisted in chunk metadata as normalized table Markdown plus row/column counts.
+- Plain PDF/Word text blocks that look like pipe, tabular, or multi-space tables are normalized into `chunk_type=TABLE` blocks where possible.
+- List-like blocks are marked as `chunk_type=LIST`, and the chunker preserves table/list line boundaries.
+- Chunk metadata now carries section path, table caption, table markdown, table row/column counts, source block index, and source offsets to the document-detail API and vector metadata.
+- The frontend Documents tab shows ingestion quality summary in the table and a dedicated quality report in the document drawer.
+
+Verified:
+
+- `.\mvnw.cmd "-Dtest=DocumentControllerTest" test` passed with 15 tests, including structured Markdown table metadata, PDF page-quality report, and scanned-PDF OCR-required reporting.
+- `npm.cmd run build` passed after surfacing quality report fields in the Vue console.
 
 Key frontend files:
 
@@ -702,10 +723,10 @@ Verified:
 - Multi-turn chat session persistence and Modular RAG MVP routing are implemented. LLM-backed CompressionQuery is wired as an optional provider-backed path, with deterministic fallback, and MultiQuery expansion is capped at 2 queries for MVP latency control.
 - Document ingestion now supports JSON text ingestion plus multipart `.txt`/Markdown/PDF/Word upload backed by pluggable local or OSS durable source storage.
 - OSS integration is implemented as `OssSourceStorageService` and selected with `knowsource.storage.type=oss`; `OssSourceStorageSmokeTest` documents and automates real-bucket verification.
-- Markdown parsing preserves heading context and table blocks. PDF parsing preserves page numbers. Word parsing uses Apache Tika.
-- Chunking now uses semantic/recursive boundaries over paragraphs, sentences, and table/list lines. Chunk metadata records section path, table caption, source block index, and source offsets, and indexing carries that metadata into `vector_store.metadata`.
+- Markdown parsing preserves heading context and structured table blocks. PDF parsing preserves page numbers and records parser quality reports. Word parsing uses Apache Tika with heuristic table/list detection.
+- Chunking now uses semantic/recursive boundaries over paragraphs, sentences, and table/list lines. Chunk metadata records section path, table caption, structured table markdown, row/column counts, source block index, and source offsets, and indexing carries that metadata into `vector_store.metadata`.
 - EvalRunner is implemented as a deterministic JUnit baseline and as admin-only operator APIs; the frontend Evaluation tab can run it and display summary metrics, per-case results, and the latest report.
-- Scanned PDFs/OCR, complex table reconstruction, and richer layout-aware extraction are still future work.
+- Scanned/image-only PDF pages are detected and reported. Local Tesseract OCR is available behind a disabled-by-default switch; cloud OCR/VL OCR, complex table reconstruction, and richer geometric layout extraction remain future enhancements.
 - JSON text ingestion still carries request content in memory; restart-safe source recovery applies to the multipart upload path.
 - Chunking is no longer a plain character-window splitter, but true semantic chunk quality still depends on the quality of upstream extraction.
 - Authentication/RBAC, self-service registration, admin user APIs, and knowledge-base member management are implemented for the MVP backend.
@@ -721,6 +742,7 @@ Recommended order:
 
 1. Run the full 3-minute demo rehearsal: login -> create/select KB -> upload -> wait READY -> publish -> wait SYNCED -> ask -> inspect sources -> inspect QaTrace -> optionally run Evaluation/Admin Users.
 2. Run the OSS smoke test against a real bucket in the target deployment environment.
-3. Treat scanned-PDF/OCR handling, complex table reconstruction, richer layout-aware extraction, and richer markdown report rendering as post-MVP enhancements.
+3. For v1.1 demo data, include one Markdown table document, one normal paged PDF, and one scanned/image-only PDF to show the quality report and OCR-required detection.
+4. Treat cloud OCR/VL OCR, complex table reconstruction, richer geometric layout extraction, and richer markdown report rendering as later enhancements.
 
 Demo rehearsal and interview narration are now the recommended next focus.

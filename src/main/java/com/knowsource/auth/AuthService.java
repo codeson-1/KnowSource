@@ -175,6 +175,9 @@ public class AuthService {
     public UserResponse updateUserRole(long userId, UpdateUserRoleRequest request) {
         requireAdmin();
         String globalRole = normalizeGlobalRole(request.globalRole());
+        if ("VIEWER".equals(globalRole)) {
+            requireNoKbManagementRole(userId);
+        }
         return jdbcClient.sql("""
                 UPDATE users
                 SET global_role = :globalRole,
@@ -244,6 +247,23 @@ public class AuthService {
             throw new IllegalArgumentException("Global role must be ADMIN, EDITOR, or VIEWER.");
         }
         return normalized;
+    }
+
+    private void requireNoKbManagementRole(long userId) {
+        List<String> blockingKbs = jdbcClient.sql("""
+                SELECT kb.name
+                FROM kb_members member
+                JOIN knowledge_bases kb ON kb.id = member.kb_id
+                WHERE member.user_id = :userId AND member.role IN ('OWNER', 'EDITOR')
+                """)
+                .param("userId", userId)
+                .query(String.class)
+                .list();
+        if (!blockingKbs.isEmpty()) {
+            throw new IllegalArgumentException(
+                "请先移交或移除该用户的知识库管理角色。用户仍在以下知识库中担任 OWNER 或 EDITOR："
+                + String.join("，", blockingKbs));
+        }
     }
 
     private void requireAdmin() {

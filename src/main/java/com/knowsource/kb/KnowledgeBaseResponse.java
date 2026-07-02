@@ -8,5 +8,7 @@ public record KnowledgeBaseResponse(
         String description,
         long ownerId,
         LocalDateTime createdAt,
-        String memberRole) {
+        String memberRole,
+        String managementRole,
+        boolean manageable) {
 }

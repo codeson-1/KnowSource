@@ -83,6 +83,7 @@ public class KnowledgeBaseService {
 
     public KnowledgeBaseResponse get(String kbId) {
         long userId = currentUserService.currentUserId();
+        CurrentUser user = currentUserService.currentUser();
         requireKbMember(kbId, userId);
         return findKnowledgeBase(kbId);
     }
@@ -92,23 +93,19 @@ public class KnowledgeBaseService {
         requireKbOwnerOrAdmin(kbId, user);
         String name = normalizeName(request.name());
         String description = normalizeDescription(request.description());
-        return jdbcClient.sql("""
-                UPDATE knowledge_bases kb
-                SET name = :name,
-                    description = :description
-                FROM kb_members member
-                WHERE kb.id = :kbId
-                  AND member.kb_id = kb.id
-                  AND member.user_id = :userId
-                RETURNING kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
+        int updated = jdbcClient.sql("""
+                UPDATE knowledge_bases
+                SET name = :name, description = :description
+                WHERE id = :kbId
                 """)
                 .param("kbId", kbId)
-                .param("userId", user.id())
                 .param("name", name)
                 .param("description", description)
-                .query(KnowledgeBaseService::mapKnowledgeBase)
-                .optional()
-                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
+                .update();
+        if (updated == 0) {
+            throw new ResourceNotFoundException("Knowledge base not found.");
+        }
+        return findKnowledgeBase(kbId);
     }
 
     public void delete(String kbId) {
@@ -196,6 +193,7 @@ public class KnowledgeBaseService {
         String username = normalizeUsername(request.username());
         String role = normalizeMemberRole(request.role());
         long memberUserId = userIdByUsername(username);
+        requireTargetEligibleForKbRole(memberUserId, role);
 
         jdbcClient.sql("""
                 INSERT INTO kb_members (kb_id, user_id, role)
@@ -213,6 +211,7 @@ public class KnowledgeBaseService {
         CurrentUser user = currentUserService.currentUser();
         requireKbOwnerOrAdmin(kbId, user);
         String role = normalizeMemberRole(request.role());
+        requireTargetEligibleForKbRole(userId, role);
         String currentRole = memberRole(kbId, userId);
         if ("OWNER".equals(currentRole) && !"OWNER".equals(role)) {
             requireAnotherOwner(kbId, userId);
@@ -253,6 +252,20 @@ public class KnowledgeBaseService {
 
     private KnowledgeBaseResponse findKnowledgeBase(String kbId) {
         long userId = currentUserService.currentUserId();
+        CurrentUser user = currentUserService.currentUser();
+        if ("ADMIN".equals(user.globalRole())) {
+            return jdbcClient.sql("""
+                    SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
+                    FROM knowledge_bases kb
+                    LEFT JOIN kb_members member ON member.kb_id = kb.id AND member.user_id = :userId
+                    WHERE kb.id = :kbId
+                    """)
+                    .param("kbId", kbId)
+                    .param("userId", userId)
+                    .query(KnowledgeBaseService::mapKnowledgeBase)
+                    .optional()
+                    .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
+        }
         return jdbcClient.sql("""
                 SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
                 FROM knowledge_bases kb
@@ -267,6 +280,17 @@ public class KnowledgeBaseService {
     }
 
     private void requireKbMember(String kbId, long userId) {
+        CurrentUser user = currentUserService.currentUser();
+        if ("ADMIN".equals(user.globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         Long count = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members
@@ -281,7 +305,61 @@ public class KnowledgeBaseService {
         }
     }
 
+    public List<KnowledgeBaseResponse> listManageable() {
+        CurrentUser user = currentUserService.currentUser();
+        if ("ADMIN".equals(user.globalRole())) {
+            return jdbcClient.sql("""
+                    SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at,
+                           member.role AS member_role
+                    FROM knowledge_bases kb
+                    LEFT JOIN kb_members member ON member.kb_id = kb.id AND member.user_id = :userId
+                    ORDER BY kb.created_at DESC, kb.id DESC
+                    """)
+                    .param("userId", user.id())
+                    .query(KnowledgeBaseService::mapKnowledgeBase)
+                    .list();
+        }
+        if ("EDITOR".equals(user.globalRole())) {
+            return jdbcClient.sql("""
+                    SELECT kb.id, kb.name, kb.description, kb.owner_id, kb.created_at, member.role AS member_role
+                    FROM knowledge_bases kb
+                    JOIN kb_members member ON member.kb_id = kb.id
+                    WHERE member.user_id = :userId AND member.role IN ('OWNER', 'EDITOR')
+                    ORDER BY kb.created_at DESC, kb.id DESC
+                    """)
+                    .param("userId", user.id())
+                    .query(KnowledgeBaseService::mapKnowledgeBase)
+                    .list();
+        }
+        return List.of();
+    }
+
+    private void requireTargetEligibleForKbRole(long userId, String kbRole) {
+        if (!"OWNER".equals(kbRole) && !"EDITOR".equals(kbRole)) {
+            return;
+        }
+        String globalRole = jdbcClient.sql("SELECT global_role FROM users WHERE id = :userId")
+                .param("userId", userId)
+                .query(String.class)
+                .optional()
+                .orElseThrow(() -> new ResourceNotFoundException("User not found."));
+        if ("VIEWER".equals(globalRole)) {
+            throw new IllegalArgumentException(
+                "VIEWER 用户只能被设为 KB VIEWER 角色，不能设为 OWNER 或 EDITOR。");
+        }
+    }
+
     private void requireKbOwnerOrAdmin(String kbId, CurrentUser user) {
+        if ("ADMIN".equals(user.globalRole())) {
+            Long exists = jdbcClient.sql("SELECT COUNT(*) FROM knowledge_bases WHERE id = :kbId")
+                    .param("kbId", kbId)
+                    .query(Long.class)
+                    .single();
+            if (exists == 0) {
+                throw new ResourceNotFoundException("Knowledge base not found.");
+            }
+            return;
+        }
         String role = jdbcClient.sql("""
                 SELECT role
                 FROM kb_members
@@ -292,13 +370,13 @@ public class KnowledgeBaseService {
                 .query(String.class)
                 .optional()
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
-        if (!"ADMIN".equals(user.globalRole()) && !"OWNER".equals(role)) {
+        if (!"OWNER".equals(role)) {
             throw new AccessDeniedException("Knowledge base owner access is required.");
         }
     }
 
     private void requireKnowledgeBaseCreateAccess(CurrentUser user) {
-        if (!Set.of("ADMIN", "EDITOR").contains(user.globalRole())) {
+        if (!"ADMIN".equals(user.globalRole()) && !"EDITOR".equals(user.globalRole())) {
             throw new AccessDeniedException("Knowledge base creation requires ADMIN or EDITOR access.");
         }
     }
@@ -403,7 +481,9 @@ public class KnowledgeBaseService {
                 rs.getString("description"),
                 rs.getLong("owner_id"),
                 rs.getTimestamp("created_at").toLocalDateTime(),
-                memberRole);
+                memberRole,
+                null,
+                false);
     }
 
     private static KnowledgeBaseMemberResponse mapMember(ResultSet rs, int rowNum) throws SQLException {

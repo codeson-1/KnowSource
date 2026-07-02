@@ -1,5 +1,7 @@
 package com.knowsource.config;
 
+import java.util.concurrent.ThreadPoolExecutor;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -47,6 +49,9 @@ public class AsyncConfig {
         executor.setCorePoolSize(corePoolSize);
         executor.setMaxPoolSize(Math.max(corePoolSize, maxPoolSize));
         executor.setQueueCapacity(queueCapacity);
+        // P1-3: use CallerRunsPolicy instead of default AbortPolicy
+        // When queue is full, caller thread executes the task (backpressure/graceful degradation)
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(10);
         executor.initialize();

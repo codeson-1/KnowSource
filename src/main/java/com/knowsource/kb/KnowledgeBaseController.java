@@ -34,6 +34,11 @@ public class KnowledgeBaseController {
         return knowledgeBaseService.listMine();
     }
 
+    @GetMapping("/manageable")
+    public List<KnowledgeBaseResponse> listManageable() {
+        return knowledgeBaseService.listManageable();
+    }
+
     @GetMapping("/{kbId}")
     public KnowledgeBaseResponse get(@PathVariable String kbId) {
         return knowledgeBaseService.get(kbId);

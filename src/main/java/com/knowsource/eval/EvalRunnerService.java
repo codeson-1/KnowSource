@@ -63,10 +63,8 @@ public class EvalRunnerService {
         requireAdmin();
         List<GoldenCase> goldenCases = loadGoldenSet();
         LocalDateTime generatedAt = LocalDateTime.now();
-        String kbId = knowledgeBaseService.create(new CreateKnowledgeBaseRequest(
-                "评测知识库 " + generatedAt.toString().replace(':', '-'),
-                "由基准集评测服务自动生成。")).id();
-        seedAndPublishDocuments(kbId);
+        // P2-2: reuse existing eval KB if available (same 4 docs, all SYNCED) to avoid accumulation
+        String kbId = findOrCreateEvalKb(generatedAt);
 
         List<EvalCaseResponse> results = new ArrayList<>();
         for (GoldenCase goldenCase : goldenCases) {
@@ -301,6 +299,33 @@ public class EvalRunnerService {
         if (!"ADMIN".equals(currentUser.globalRole())) {
             throw new AccessDeniedException("ADMIN access is required.");
         }
+    }
+
+    private String findOrCreateEvalKb(LocalDateTime generatedAt) {
+        // Try to reuse an existing eval KB (prefix "评测知识库", 4 docs, all SYNCED)
+        String existingKbId = jdbcClient.sql("""
+                SELECT kb.id
+                FROM knowledge_bases kb
+                WHERE kb.name LIKE '评测知识库%'
+                  AND (SELECT COUNT(*) FROM documents WHERE kb_id = kb.id) = 4
+                  AND (SELECT COUNT(*) FROM documents WHERE kb_id = kb.id AND status = 'PUBLISHED' AND index_status = 'SYNCED') = 4
+                ORDER BY kb.created_at DESC
+                LIMIT 1
+                """)
+                .query(String.class)
+                .optional()
+                .orElse(null);
+
+        if (existingKbId != null) {
+            return existingKbId;
+        }
+
+        // Create new eval KB and seed documents
+        String kbId = knowledgeBaseService.create(new CreateKnowledgeBaseRequest(
+                "评测知识库 " + generatedAt.toString().replace(':', '-'),
+                "由基准集评测服务自动生成。")).id();
+        seedAndPublishDocuments(kbId);
+        return kbId;
     }
 
     private static void sleep() {

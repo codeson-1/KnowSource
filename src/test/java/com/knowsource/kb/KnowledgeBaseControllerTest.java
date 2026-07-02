@@ -113,7 +113,7 @@ class KnowledgeBaseControllerTest {
     @Test
     void updatesKnowledgeBaseAndManagesMembers() throws Exception {
         String kbId = createKnowledgeBase("Team KB");
-        long viewerId = createUser("viewer", "VIEWER");
+        long editorId = createUser("editor", "EDITOR");
 
         mockMvc.perform(put("/api/kbs/{kbId}", kbId)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -131,15 +131,15 @@ class KnowledgeBaseControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
-                                  "username": "viewer",
+                                  "username": "editor",
                                   "role": "VIEWER"
                                 }
                                 """))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.userId").value(viewerId))
+                .andExpect(jsonPath("$.userId").value(editorId))
                 .andExpect(jsonPath("$.memberRole").value("VIEWER"));
 
-        mockMvc.perform(put("/api/kbs/{kbId}/members/{userId}", kbId, viewerId)
+        mockMvc.perform(put("/api/kbs/{kbId}/members/{userId}", kbId, editorId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"role\":\"EDITOR\"}"))
                 .andExpect(status().isOk())
@@ -149,19 +149,19 @@ class KnowledgeBaseControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(2)));
 
-        mockMvc.perform(delete("/api/kbs/{kbId}/members/{userId}", kbId, viewerId))
+        mockMvc.perform(delete("/api/kbs/{kbId}/members/{userId}", kbId, editorId))
                 .andExpect(status().isNoContent());
 
-        Long viewerMemberships = jdbcClient.sql("""
+        Long editorMemberships = jdbcClient.sql("""
                 SELECT COUNT(*)
                 FROM kb_members
                 WHERE kb_id = :kbId AND user_id = :userId
                 """)
                 .param("kbId", kbId)
-                .param("userId", viewerId)
+                .param("userId", editorId)
                 .query(Long.class)
                 .single();
-        org.assertj.core.api.Assertions.assertThat(viewerMemberships).isZero();
+        org.assertj.core.api.Assertions.assertThat(editorMemberships).isZero();
     }
 
     @Test

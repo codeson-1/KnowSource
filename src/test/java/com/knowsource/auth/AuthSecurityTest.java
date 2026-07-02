@@ -153,15 +153,15 @@ class AuthSecurityTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {
-                                  "username": "editor",
-                                  "password": "editor",
-                                  "email": "editor@knowsource.local",
-                                  "globalRole": "EDITOR"
+                                  "username": "managed",
+                                  "password": "managed",
+                                  "email": "managed@knowsource.local",
+                                  "globalRole": "VIEWER"
                                 }
                                 """))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.username").value("editor"))
-                .andExpect(jsonPath("$.globalRole").value("EDITOR"))
+                .andExpect(jsonPath("$.username").value("managed"))
+                .andExpect(jsonPath("$.globalRole").value("VIEWER"))
                 .andReturn();
 
         long userId = objectMapper.readTree(created.getResponse().getContentAsString()).path("id").asLong();
@@ -177,6 +177,24 @@ class AuthSecurityTest {
                         .header("Authorization", "Bearer " + adminToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].username").exists());
+    }
+
+    @Test
+    void globalEditorRoleIsAccepted() throws Exception {
+        String adminToken = login("demo", "demo");
+
+        mockMvc.perform(post("/api/auth/users")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "username": "legacy-editor",
+                                  "password": "legacy-editor",
+                                  "email": "legacy-editor@knowsource.local",
+                                  "globalRole": "EDITOR"
+                                }
+                                """))
+                .andExpect(status().isCreated());
     }
 
     @Test
@@ -200,9 +218,9 @@ class AuthSecurityTest {
         mockMvc.perform(put("/api/auth/users/{userId}/role", viewerId)
                         .header("Authorization", "Bearer " + adminToken)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"globalRole\":\"EDITOR\"}"))
+                        .content("{\"globalRole\":\"ADMIN\"}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.globalRole").value("EDITOR"));
+                .andExpect(jsonPath("$.globalRole").value("ADMIN"));
 
         mockMvc.perform(get("/api/kbs")
                         .header("Authorization", "Bearer " + viewerToken))

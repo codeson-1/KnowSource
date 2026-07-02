@@ -10,6 +10,8 @@ knowsource:
       root: ./target/test-sources
   ingest:
     max-file-size-bytes: 1048576
+    ocr:
+      enabled: false
   async:
     ingest:
       core-pool-size: 1

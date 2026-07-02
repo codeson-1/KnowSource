@@ -96,6 +96,11 @@ knowsource:
       timeout-seconds: ${KNOWSOURCE_STORAGE_OSS_TIMEOUT_SECONDS:30}
   ingest:
     max-file-size-bytes: ${KNOWSOURCE_INGEST_MAX_FILE_SIZE_BYTES:52428800}
+    ocr:
+      enabled: ${KNOWSOURCE_INGEST_OCR_ENABLED:false}
+      command: ${KNOWSOURCE_INGEST_OCR_COMMAND:tesseract}
+      language: ${KNOWSOURCE_INGEST_OCR_LANGUAGE:chi_sim+eng}
+      timeout-seconds: ${KNOWSOURCE_INGEST_OCR_TIMEOUT_SECONDS:30}
   async:
     ingest:
       core-pool-size: ${KNOWSOURCE_INGEST_EXECUTOR_CORE_POOL_SIZE:2}
@@ -116,8 +121,17 @@ knowsource:
   spike:
     enabled: ${KNOWSOURCE_SPIKE_ENABLED:false}
   retrieval:
+    mode: ${KNOWSOURCE_RETRIEVAL_MODE:hybrid}
     max-distance: ${KNOWSOURCE_RETRIEVAL_MAX_DISTANCE:0.8}
+    vector-top-k: ${KNOWSOURCE_RETRIEVAL_VECTOR_TOP_K:${KNOWSOURCE_RETRIEVAL_CANDIDATE_TOP_K:15}}
+    lexical-top-k: ${KNOWSOURCE_RETRIEVAL_LEXICAL_TOP_K:15}
     candidate-top-k: ${KNOWSOURCE_RETRIEVAL_CANDIDATE_TOP_K:15}
+    hybrid:
+      rrf-k: ${KNOWSOURCE_HYBRID_RRF_K:60}
+      keyword-on-rewrites: ${KNOWSOURCE_HYBRID_KEYWORD_ON_REWRITES:false}
+      min-keyword-tokens: ${KNOWSOURCE_HYBRID_MIN_KEYWORD_TOKENS:1}
+    lexical:
+      threshold: ${KNOWSOURCE_LEXICAL_THRESHOLD:0.0}
   modular-rag:
     compression-query:
       enabled: ${KNOWSOURCE_COMPRESSION_QUERY_ENABLED:true}

@@ -12,9 +12,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class EvalController {
 
     private final EvalRunnerService evalRunnerService;
+    private final EvalHistoryService evalHistoryService;
 
-    public EvalController(EvalRunnerService evalRunnerService) {
+    public EvalController(EvalRunnerService evalRunnerService, EvalHistoryService evalHistoryService) {
         this.evalRunnerService = evalRunnerService;
+        this.evalHistoryService = evalHistoryService;
     }
 
     @PostMapping("/golden-set/run")
@@ -29,6 +31,6 @@ public class EvalController {
 
     @GetMapping("/golden-set/history")
     public List<EvalHistoryItem> history() {
-        return evalRunnerService.listHistory();
+        return evalHistoryService.listHistory();
     }
 }

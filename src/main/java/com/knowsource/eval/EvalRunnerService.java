@@ -6,103 +6,109 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.knowsource.chat.ChatRequest;
 import com.knowsource.chat.ChatResponse;
 import com.knowsource.chat.ChatService;
 import com.knowsource.chat.SourceCitation;
-import com.knowsource.document.CreateDocumentRequest;
-import com.knowsource.document.DocumentIngestResponse;
-import com.knowsource.document.DocumentService;
 import com.knowsource.document.ResourceNotFoundException;
-import com.knowsource.index.DocumentIndexOutboxService;
-import com.knowsource.kb.CreateKnowledgeBaseRequest;
-import com.knowsource.kb.KnowledgeBaseService;
 import com.knowsource.security.CurrentUser;
 import com.knowsource.security.CurrentUserService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PreDestroy;
+
+/**
+ * 评测运行编排服务 —— 负责 Golden Set 评测流程的编排与指标汇总。
+ * <p>
+ * Phase 1（问答）和 Phase 2（Faithfulness 评测）均使用线程池并发执行，
+ * 并发度通过 {@code knowsource.eval.concurrency} 配置（默认 4）。
+ * <p>
+ * 种子文档 → EvalSeedService，报告渲染 → EvalReportRenderer，历史查询 → EvalHistoryService。
+ */
 @Service
 public class EvalRunnerService {
 
+    private static final Logger log = LoggerFactory.getLogger(EvalRunnerService.class);
+
     private static final Path GOLDEN_SET = Path.of("docs/eval/golden-set.jsonl");
     private static final Path REPORT = Path.of("docs/eval/report.md");
-    private static final Path REPORTS_DIR = Path.of("docs/eval/reports");
-    private static final String REPORT_PATH = "docs/eval/report.md";
+    static final String REPORT_PATH = "docs/eval/report.md";
     private static final String EXPECTED_REFUSAL = "拒答";
+
+    private static final int EVAL_CONCURRENCY = 4;
 
     private final ObjectMapper objectMapper;
     private final CurrentUserService currentUserService;
-    private final KnowledgeBaseService knowledgeBaseService;
-    private final DocumentService documentService;
-    private final DocumentIndexOutboxService documentIndexOutboxService;
     private final ChatService chatService;
     private final JdbcClient jdbcClient;
     private final FaithfulnessEvaluator faithfulnessEvaluator;
+    private final EvalSeedService evalSeedService;
+    private final EvalReportRenderer evalReportRenderer;
+    private final ExecutorService evalExecutor;
 
     public EvalRunnerService(
             ObjectMapper objectMapper,
             CurrentUserService currentUserService,
-            KnowledgeBaseService knowledgeBaseService,
-            DocumentService documentService,
-            DocumentIndexOutboxService documentIndexOutboxService,
             ChatService chatService,
             JdbcClient jdbcClient,
-            FaithfulnessEvaluator faithfulnessEvaluator) {
+            FaithfulnessEvaluator faithfulnessEvaluator,
+            EvalSeedService evalSeedService,
+            EvalReportRenderer evalReportRenderer) {
         this.objectMapper = objectMapper;
         this.currentUserService = currentUserService;
-        this.knowledgeBaseService = knowledgeBaseService;
-        this.documentService = documentService;
-        this.documentIndexOutboxService = documentIndexOutboxService;
         this.chatService = chatService;
         this.jdbcClient = jdbcClient;
         this.faithfulnessEvaluator = faithfulnessEvaluator;
+        this.evalSeedService = evalSeedService;
+        this.evalReportRenderer = evalReportRenderer;
+        this.evalExecutor = Executors.newFixedThreadPool(EVAL_CONCURRENCY, new EvalThreadFactory());
+        log.info("评测线程池已创建，并发度: {}", EVAL_CONCURRENCY);
     }
+
+    @PreDestroy
+    void shutdown() {
+        log.info("评测线程池正在关闭...");
+        evalExecutor.shutdown();
+    }
+
+    // ── 主流程 ──────────────────────────────────────────────
 
     public EvalRunResponse runGoldenSet() {
         requireAdmin();
         List<GoldenCase> goldenCases = loadGoldenSet();
+        int total = goldenCases.size();
+        log.info("开始评测，共 {} 条用例，并发度: {}", total, EVAL_CONCURRENCY);
+
         LocalDateTime generatedAt = LocalDateTime.now();
-        // P2-2: reuse existing eval KB if available (same 4 docs, all SYNCED) to avoid accumulation
-        String kbId = findOrCreateEvalKb(generatedAt);
+        String kbId = evalSeedService.findOrCreateEvalKb(generatedAt);
 
-        // Phase 1: ask all golden cases and collect raw pairs
-        record EvalRaw(ChatResponse response, GoldenCase goldenCase) {}
-        List<EvalRaw> raws = new ArrayList<>();
-        for (GoldenCase goldenCase : goldenCases) {
-            ChatResponse response = askGoldenCase(kbId, goldenCase);
-            raws.add(new EvalRaw(response, goldenCase));
-            waitForTrace(response.qaTraceId());
-        }
+        // Phase 1: 并发问答，收集原始对
+        long phase1Start = System.currentTimeMillis();
+        List<EvalRaw> raws = runPhase1Concurrently(kbId, goldenCases, total);
+        log.info("Phase 1 完成，耗时 {} ms", System.currentTimeMillis() - phase1Start);
 
-        // Phase 2: build case responses with faithfulness evaluation (LLM-as-Judge, post-hoc)
-        List<EvalCaseResponse> results = new ArrayList<>();
-        for (EvalRaw raw : raws) {
-            GoldenCase goldenCase = raw.goldenCase();
-            ChatResponse response = raw.response();
-            Double faithfulness = null;
-            if (!goldenCase.outOfScope() && !response.refused() && !response.sources().isEmpty()) {
-                faithfulness = faithfulnessEvaluator.evaluate(
-                        goldenCase.question(), response.answer(), response.sources());
-            }
-            results.add(toCaseResponse(goldenCase, response, faithfulness));
-        }
+        // Phase 2: 并发 Faithfulness 评测，构建用例响应
+        long phase2Start = System.currentTimeMillis();
+        List<EvalCaseResponse> results = runPhase2Concurrently(raws, total);
+        log.info("Phase 2 完成，耗时 {} ms", System.currentTimeMillis() - phase2Start);
 
         EvalSummaryResponse summary = summarize(results);
-        String report = renderReport(generatedAt, summary, results);
-        writeReport(report, generatedAt);
+        evalReportRenderer.renderAndWrite(generatedAt, summary, results);
+        log.info("评测报告已生成: {}", REPORT_PATH);
+
         return new EvalRunResponse(kbId, generatedAt, summary, results, REPORT_PATH);
     }
 
@@ -112,309 +118,78 @@ public class EvalRunnerService {
             throw new ResourceNotFoundException("Eval report not found.");
         }
         try {
-            LocalDateTime updatedAt = LocalDateTime.ofInstant(Files.getLastModifiedTime(REPORT).toInstant(), ZoneId.systemDefault());
-            return new EvalReportResponse(updatedAt, REPORT_PATH, Files.readString(REPORT, StandardCharsets.UTF_8));
+            LocalDateTime updatedAt = LocalDateTime.ofInstant(
+                    Files.getLastModifiedTime(REPORT).toInstant(), ZoneId.systemDefault());
+            return new EvalReportResponse(updatedAt, REPORT_PATH,
+                    Files.readString(REPORT, StandardCharsets.UTF_8));
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to read eval report.", ex);
         }
     }
 
-    public List<EvalHistoryItem> listHistory() {
-        requireAdmin();
-        if (!Files.exists(REPORTS_DIR)) {
-            return List.of();
+    // ── Phase 1: 并发问答 ─────────────────────────────────
+
+    private List<EvalRaw> runPhase1Concurrently(String kbId, List<GoldenCase> goldenCases, int total) {
+        AtomicInteger completed = new AtomicInteger(0);
+        List<Future<EvalRaw>> futures = new ArrayList<>();
+
+        for (GoldenCase goldenCase : goldenCases) {
+            futures.add(evalExecutor.submit(() -> {
+                ChatResponse response = askGoldenCase(kbId, goldenCase);
+                waitForTrace(response.qaTraceId());
+                int done = completed.incrementAndGet();
+                log.info("[Phase 1] 进度 {}/{} — {}", done, total, goldenCase.id());
+                return new EvalRaw(response, goldenCase);
+            }));
         }
-        try (Stream<Path> files = Files.list(REPORTS_DIR)) {
-            return files
-                    .filter(path -> path.getFileName().toString().startsWith("report-")
-                            && path.getFileName().toString().endsWith(".md"))
-                    .map(this::parseHistoryItem)
-                    .filter(item -> item != null)
-                    .sorted(Comparator.comparing(EvalHistoryItem::generatedAt).reversed())
-                    .toList();
-        } catch (IOException ex) {
-            return List.of();
+
+        List<EvalRaw> raws = new ArrayList<>();
+        for (Future<EvalRaw> future : futures) {
+            try {
+                raws.add(future.get());
+            } catch (Exception e) {
+                futures.forEach(f -> f.cancel(true));
+                throw new IllegalStateException("Phase 1 并发执行失败: " + e.getMessage(), e);
+            }
         }
+        return raws;
     }
 
-    private EvalHistoryItem parseHistoryItem(Path file) {
-        try {
-            String content = Files.readString(file, StandardCharsets.UTF_8);
-            Map<String, String> metrics = parseMetricsTable(content);
-            if (metrics.isEmpty()) {
-                return null;
-            }
+    // ── Phase 2: 并发 Faithfulness 评测 ───────────────────
 
-            String generatedAtStr = metrics.get("生成时间");
-            LocalDateTime generatedAt = generatedAtStr != null ? LocalDateTime.parse(generatedAtStr) : null;
-            if (generatedAt == null) {
-                return null;
-            }
+    private List<EvalCaseResponse> runPhase2Concurrently(List<EvalRaw> raws, int total) {
+        AtomicInteger completed = new AtomicInteger(0);
+        List<Future<EvalCaseResponse>> futures = new ArrayList<>();
 
-            int totalCases = parseMetricInt(metrics, "用例总数");
-            int inScopeCases = parseMetricInt(metrics, "范围内用例");
-            int outOfScopeCases = parseMetricInt(metrics, "范围外用例");
-
-            return new EvalHistoryItem(
-                    generatedAt,
-                    REPORTS_DIR.relativize(file).toString(),
-                    totalCases,
-                    inScopeCases,
-                    outOfScopeCases,
-                    parseMetricPct(metrics, "文档命中率@5"),
-                    parseMetricPct(metrics, "引用准确率"),
-                    parseMetricPct(metrics, "拒答准确率"),
-                    parseMetricDouble(metrics, "忠实度 (Faithfulness)"));
-        } catch (Exception ex) {
-            return null;
-        }
-    }
-
-    private static Map<String, String> parseMetricsTable(String content) {
-        Map<String, String> metrics = new LinkedHashMap<>();
-        boolean inTable = false;
-        for (String line : content.split("\n")) {
-            String trimmed = line.trim();
-            if (trimmed.startsWith("| 指标 ") || trimmed.startsWith("| Metric ")) {
-                inTable = true;
-                continue;
-            }
-            if (!inTable) {
-                // Extract generatedAt from "生成时间: xxx" line
-                Matcher genMatch = Pattern.compile("^生成时间:\\s*(.+)$").matcher(trimmed);
-                if (genMatch.find()) {
-                    metrics.put("生成时间", genMatch.group(1).trim());
+        for (EvalRaw raw : raws) {
+            futures.add(evalExecutor.submit(() -> {
+                GoldenCase goldenCase = raw.goldenCase();
+                ChatResponse response = raw.response();
+                Double faithfulness = null;
+                if (!goldenCase.outOfScope() && !response.refused() && !response.sources().isEmpty()) {
+                    faithfulness = faithfulnessEvaluator.evaluate(
+                            goldenCase.question(), response.answer(), response.sources());
                 }
-                continue;
+                EvalCaseResponse result = toCaseResponse(goldenCase, response, faithfulness);
+                int done = completed.incrementAndGet();
+                log.info("[Phase 2] 进度 {}/{} — {}", done, total, goldenCase.id());
+                return result;
+            }));
+        }
+
+        List<EvalCaseResponse> results = new ArrayList<>();
+        for (Future<EvalCaseResponse> future : futures) {
+            try {
+                results.add(future.get());
+            } catch (Exception e) {
+                futures.forEach(f -> f.cancel(true));
+                throw new IllegalStateException("Phase 2 并发执行失败: " + e.getMessage(), e);
             }
-            if (!trimmed.startsWith("|")) {
-                break;
-            }
-            if (trimmed.contains("---")) {
-                continue;
-            }
-            String[] cells = trimmed.split("\\|");
-            if (cells.length >= 3) {
-                metrics.put(cells[1].trim(), cells[2].trim());
-            }
         }
-        return metrics;
+        return results;
     }
 
-    private static int parseMetricInt(Map<String, String> metrics, String key) {
-        try {
-            return Integer.parseInt(metrics.getOrDefault(key, "0"));
-        } catch (NumberFormatException ignored) {
-            return 0;
-        }
-    }
-
-    private static double parseMetricPct(Map<String, String> metrics, String key) {
-        String value = metrics.get(key);
-        if (value == null) {
-            return 0.0d;
-        }
-        try {
-            String num = value.replace("%", "").trim();
-            return Double.parseDouble(num) / 100.0d;
-        } catch (NumberFormatException ignored) {
-            return 0.0d;
-        }
-    }
-
-    private static Double parseMetricDouble(Map<String, String> metrics, String key) {
-        String value = metrics.get(key);
-        if (value == null || "-".equals(value.trim())) {
-            return null;
-        }
-        try {
-            String num = value.replace("%", "").trim();
-            return Double.parseDouble(num) / 100.0d;
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
-    }
-
-    private void seedAndPublishDocuments(String kbId) {
-        publishDocument(createDocument(kbId, "年假制度",
-                """
-                        # 年假制度
-
-                        制度编号：LEAVE-2024-01
-
-                        ## 假期额度
-
-                        全职员工每年享有 10 天年假。工龄满 10 年享 15 天年假。未使用的年假最多可以结转 5 天到下一自然年，跨年结转需 VP 审批。
-
-                        ## 审批流程
-
-                        员工休年假前必须先获得直属经理审批。连续请假超过 5 天的年假申请，还需要 HR 复核。
-                        """));
-        publishDocument(createDocument(kbId, "办公安全制度",
-                """
-                        # 办公安全制度
-
-                        制度编号：SEC-2024-02
-
-                        ## 办公区出入
-
-                        员工进入办公区必须佩戴安全工牌。访客需要在前台登记，并佩戴访客工牌。工牌补办费用 50 元。
-
-                        ## 事件上报
-
-                        如果安全工牌丢失，员工必须在 24 小时内向安全部门上报，以便及时停用门禁卡。P0 事件需 30 分钟内响应。
-                        """));
-        publishDocument(createDocument(kbId, "报销制度",
-                """
-                        # 报销制度
-
-                        制度编号：EXP-2024-03
-
-                        ## 提交时限
-
-                        报销票据应在费用发生后 30 天内通过财务门户提交。单笔超过 5000 元的报销需附加情况说明。
-
-                        ## 报销额度
-
-                        | 类别 | 额度 |
-                        | --- | --- |
-                        | 餐费 | 120 |
-                        | 住宿 | 800（一线城市上浮 20%） |
-                        | 市内交通 | 300 |
-                        """));
-        publishDocument(createDocument(kbId, "远程办公制度",
-                """
-                        # 远程办公制度
-
-                        制度编号：REMOTE-2024-01
-
-                        员工获得团队负责人审批后，每周可以远程办公 2 天。强制线下培训日不得安排远程办公。VPN 断线需 15 分钟内上报。
-                        """));
-        // 以下为干扰文档——与目标文档语义相近但不含制度编号，用于逼出 hybrid 的关键词匹配优势
-        publishDocument(createDocument(kbId, "考勤管理制度",
-                """
-                        # 考勤管理制度
-
-                        ## 工作时间
-
-                        标准工作时间为周一至周五 9:00-18:00，午休 1 小时。弹性工作制员工可在 7:00-10:00 之间到岗。
-
-                        ## 请假流程
-
-                        员工请假需提前在 OA 系统提交申请。病假需附医院证明，事假每年累计不超过 15 天。
-                        """));
-        publishDocument(createDocument(kbId, "差旅费用管理制度",
-                """
-                        # 差旅费用管理制度
-
-                        ## 交通标准
-
-                        高铁二等座或飞机经济舱，单程超过 800 公里的可选高铁一等座。市内交通实报实销，每日上限 200 元。
-
-                        ## 住宿标准
-
-                        一线城市住宿标准 600 元/晚，非一线城市 400 元/晚。超标部分由个人承担。
-                        """));
-        publishDocument(createDocument(kbId, "设备与网络安全管理",
-                """
-                        # 设备与网络安全管理
-
-                        ## 设备使用
-
-                        公司配发电脑不得安装未经授权的软件。离职时需归还全部设备并清除个人数据。
-
-                        ## 网络安全
-
-                        禁止在公共 Wi-Fi 环境下访问公司内网。敏感数据传输必须使用加密通道。
-                        """));
-        // 第二批干扰文档——进一步压缩语义空间，逼出 hybrid 关键词匹配优势
-        publishDocument(createDocument(kbId, "员工培训管理制度",
-                """
-                        # 员工培训管理制度
-
-                        ## 入职培训
-
-                        新员工入职后需在一周内完成公司文化与规章制度培训。各部门需指定导师进行岗位技能带教。
-
-                        ## 年度培训
-
-                        每位员工每年需完成不少于 40 学时的专业技能培训。培训完成情况纳入年度绩效考核。
-                        """));
-        publishDocument(createDocument(kbId, "采购审批制度",
-                """
-                        # 采购审批制度
-
-                        ## 审批权限
-
-                        单笔采购金额 2000 元以下由部门经理审批，2000-10000 元需总监审批，超过 10000 元需总经理审批。
-
-                        ## 供应商管理
-
-                        所有供应商需通过资质审核后方可合作。年度采购额超过 50000 元的供应商需签订框架协议。
-                        """));
-        publishDocument(createDocument(kbId, "消防安全管理制度",
-                """
-                        # 消防安全管理制度
-
-                        ## 日常巡查
-
-                        每月进行一次消防设施检查，包括灭火器压力、消防栓水压、应急照明等。检查记录需存档备查。
-
-                        ## 应急演练
-
-                        每半年组织一次全员消防疏散演练。各部门安全员需在 5 分钟内完成本区域人员清点。
-                        """));
-        publishDocument(createDocument(kbId, "会议与协作制度",
-                """
-                        # 会议与协作制度
-
-                        ## 会议室预约
-
-                        会议室需提前在 OA 系统预约，单次会议时长不超过 2 小时。投影仪等设备使用后需关闭并归位。
-
-                        ## 线上协作
-
-                        跨部门协作项目需在协作平台上创建项目空间。会议纪要在会后 24 小时内同步至项目空间。
-                        """));
-        publishDocument(createDocument(kbId, "数据备份与恢复制度",
-                """
-                        # 数据备份与恢复制度
-
-                        ## 备份策略
-
-                        核心业务数据每日凌晨全量备份，保留最近 30 天。备份文件异地存储，物理距离不少于 500 公里。
-
-                        ## 恢复演练
-
-                        每季度进行一次数据恢复演练。关键系统恢复时间不超过 4 小时。
-                        """));
-    }
-
-    private String createDocument(String kbId, String title, String content) {
-        DocumentIngestResponse response = documentService.ingest(kbId, new CreateDocumentRequest(title, content));
-        waitForIngestReady(response.document().id());
-        return response.document().id();
-    }
-
-    private void publishDocument(String docId) {
-        documentService.publish(docId);
-        if (!documentIndexOutboxService.processNextPendingEvent()) {
-            throw new IllegalStateException("No pending index event was processed for document " + docId + ".");
-        }
-    }
-
-    private ChatResponse askGoldenCase(String kbId, GoldenCase goldenCase) {
-        if (goldenCase.setupQuestion() == null || goldenCase.setupQuestion().isBlank()) {
-            return ask(kbId, goldenCase.question(), null, goldenCase.profile());
-        }
-        ChatResponse setupResponse = ask(kbId, goldenCase.setupQuestion(), null, "auto");
-        waitForTrace(setupResponse.qaTraceId());
-        return ask(kbId, goldenCase.question(), setupResponse.sessionId(), goldenCase.profile());
-    }
-
-    private ChatResponse ask(String kbId, String question, String sessionId, String profile) {
-        return chatService.answer(kbId, new ChatRequest(question, 5, profile, sessionId));
-    }
+    // ── Golden Set 加载 ────────────────────────────────────
 
     private List<GoldenCase> loadGoldenSet() {
         try {
@@ -433,28 +208,42 @@ public class EvalRunnerService {
         }
     }
 
+    // ── 问答执行 ──────────────────────────────────────────
+
+    private ChatResponse askGoldenCase(String kbId, GoldenCase goldenCase) {
+        if (goldenCase.setupQuestion() == null || goldenCase.setupQuestion().isBlank()) {
+            return ask(kbId, goldenCase.question(), null, goldenCase.profile());
+        }
+        // 多轮对话前置问题 → 追问，必须在同一线程内顺序执行以保持会话
+        ChatResponse setupResponse = ask(kbId, goldenCase.setupQuestion(), null, "auto");
+        waitForTrace(setupResponse.qaTraceId());
+        return ask(kbId, goldenCase.question(), setupResponse.sessionId(), goldenCase.profile());
+    }
+
+    private ChatResponse ask(String kbId, String question, String sessionId, String profile) {
+        return chatService.answer(kbId, new ChatRequest(question, 5, profile, sessionId));
+    }
+
+    // ── 用例评估 ──────────────────────────────────────────
+
     private EvalCaseResponse toCaseResponse(GoldenCase goldenCase, ChatResponse response, Double faithfulness) {
         List<String> sourceTitles = response.sources().stream()
                 .map(SourceCitation::title)
                 .toList();
 
-        // 文档命中率: 期望文档标题是否出现在 Top-5 来源中（retrieval 质量）
         boolean documentHit = !goldenCase.outOfScope()
                 && goldenCase.expectedDocTitle() != null
                 && sourceTitles.contains(goldenCase.expectedDocTitle());
 
         boolean refusalCorrect = goldenCase.outOfScope() == response.refused();
 
-        String answerText = extractAnswer(response);
+        String answerText = response.answer();
         String matchedKeyword = goldenCase.expectedKeywords().stream()
                 .filter(kw -> answerText != null && answerText.contains(kw))
                 .findFirst().orElse(null);
         boolean keywordHit = matchedKeyword != null;
 
-        // 引用准确率: 文档命中 且 答案包含期望关键词（end-to-end 质量，答案是否真正使用了检索到的信息）
         boolean citationHit = documentHit && keywordHit;
-
-        // 通过判定: 范围内用例需文档命中且未拒答；范围外用例需正确拒答
         boolean passed = goldenCase.outOfScope() ? refusalCorrect : documentHit && !response.refused();
 
         int docRank = 0;
@@ -487,19 +276,16 @@ public class EvalRunnerService {
                 faithfulness);
     }
 
-    private String extractAnswer(ChatResponse response) {
-        return response.answer();
-    }
+    // ── 指标汇总 ──────────────────────────────────────────
 
     private EvalSummaryResponse summarize(List<EvalCaseResponse> results) {
-        int inScope = (int) results.stream().filter(result -> !EXPECTED_REFUSAL.equals(result.expected())).count();
+        int inScope = (int) results.stream()
+                .filter(result -> !EXPECTED_REFUSAL.equals(result.expected())).count();
         int outOfScope = results.size() - inScope;
 
-        // 文档命中率: 期望文档在 Top-5 来源中的命中率（retrieval 质量）
         long documentHits = results.stream().filter(EvalCaseResponse::documentHit).count();
         double documentHitRate = inScope == 0 ? 0.0d : (double) documentHits / inScope;
 
-        // 引用准确率: 文档命中且答案包含期望关键词（end-to-end 质量）
         long citationHits = results.stream().filter(EvalCaseResponse::citationHit).count();
         double citationHitRate = inScope == 0 ? 0.0d : (double) citationHits / inScope;
 
@@ -514,7 +300,8 @@ public class EvalRunnerService {
                 .toList();
 
         long keywordHits = inScopeResults.stream().filter(EvalCaseResponse::keywordHit).count();
-        double keywordHitRate = inScopeResults.isEmpty() ? 0 : (double) keywordHits / inScopeResults.size();
+        double keywordHitRate = inScopeResults.isEmpty() ? 0
+                : (double) keywordHits / inScopeResults.size();
 
         double mrr = inScopeResults.stream()
                 .mapToDouble(r -> r.docRank() > 0 ? 1.0 / r.docRank() : 0.0)
@@ -525,7 +312,6 @@ public class EvalRunnerService {
                 .filter(rank -> rank > 0)
                 .average().orElse(0);
 
-        // Faithfulness: 对范围内非拒答案例的 LLM-as-Judge 忠实度均值
         Double faithfulness = inScopeResults.stream()
                 .filter(r -> !r.refused())
                 .map(EvalCaseResponse::faithfulness)
@@ -542,81 +328,7 @@ public class EvalRunnerService {
                 keywordHitRate, mrr, meanDocRank, faithfulness);
     }
 
-    private String renderReport(LocalDateTime generatedAt, EvalSummaryResponse summary, List<EvalCaseResponse> results) {
-        StringBuilder report = new StringBuilder();
-        report.append("# KnowSource 评测报告\n\n");
-        report.append("生成时间: ").append(generatedAt).append("\n\n");
-        report.append("| 指标 | 数值 |\n");
-        report.append("|---|---:|\n");
-        report.append("| 用例总数 | ").append(summary.totalCases()).append(" |\n");
-        report.append("| 范围内用例 | ").append(summary.inScopeCases()).append(" |\n");
-        report.append("| 范围外用例 | ").append(summary.outOfScopeCases()).append(" |\n");
-        report.append("| 文档命中率@5 | ").append(formatPercent(summary.documentHitRate())).append(" |\n");
-        report.append("| 引用准确率 | ").append(formatPercent(summary.citationHitRate())).append(" |\n");
-        report.append("| 拒答准确率 | ").append(formatPercent(summary.refusalAccuracy())).append(" |\n");
-        report.append("| 关键词命中率 | ").append(formatPercent(summary.keywordHitRate())).append(" |\n");
-        if (summary.faithfulness() != null) {
-            report.append("| 忠实度 (Faithfulness) | ").append(formatPercent(summary.faithfulness())).append(" |\n");
-        }
-        report.append("| MRR | ").append(String.format("%.3f", summary.mrr())).append(" |\n");
-        report.append("| 平均文档排名 | ").append(String.format("%.1f", summary.meanDocRank())).append(" |\n\n");
-        report.append("## 用例结果\n\n");
-        report.append("| 用例 ID | 前置问题 | 问题 | 期望 | 是否拒答 | 来源文档 | 文档命中 | 引用准确 | 是否通过 | 关键词命中 | 命中关键词 | 文档排名 | 忠实度 | Trace |\n");
-        report.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
-        for (EvalCaseResponse result : results) {
-            report.append("| ")
-                    .append(result.id()).append(" | ")
-                    .append(escape(result.setupQuestion())).append(" | ")
-                    .append(escape(result.question())).append(" | ")
-                    .append(result.expected()).append(" | ")
-                    .append(result.refused() ? "是" : "否").append(" | ")
-                    .append(escape(String.join(", ", result.sourceTitles()))).append(" | ")
-                    .append(result.documentHit() ? "是" : "否").append(" | ")
-                    .append(result.citationHit() ? "是" : "否").append(" | ")
-                    .append(result.passed() ? "是" : "否").append(" | ")
-                    .append(result.keywordHit() ? "是" : "否").append(" | ")
-                    .append(escape(result.matchedKeyword())).append(" | ")
-                    .append(result.docRank() == 0 ? "-" : String.valueOf(result.docRank())).append(" | ")
-                    .append(result.faithfulness() != null ? formatPercent(result.faithfulness()) : "-").append(" | ")
-                    .append(result.qaTraceId())
-                    .append(" |\n");
-        }
-        return report.toString();
-    }
-
-    private void writeReport(String report, LocalDateTime generatedAt) {
-        try {
-            Files.createDirectories(REPORT.getParent());
-            Files.writeString(REPORT, report, StandardCharsets.UTF_8);
-
-            // Archive a timestamped copy for history comparison
-            String timestamp = generatedAt.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            Files.createDirectories(REPORTS_DIR);
-            Files.writeString(REPORTS_DIR.resolve("report-" + timestamp + ".md"), report, StandardCharsets.UTF_8);
-        } catch (IOException ex) {
-            throw new IllegalStateException("Failed to write eval report.", ex);
-        }
-    }
-
-    private void waitForIngestReady(String docId) {
-        for (int i = 0; i < 120; i++) {
-            String status = jdbcClient.sql("""
-                    SELECT status
-                    FROM ingest_tasks
-                    WHERE doc_id = :docId
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                    """)
-                    .param("docId", docId)
-                    .query(String.class)
-                    .single();
-            if ("READY".equals(status)) {
-                return;
-            }
-            sleep();
-        }
-        throw new IllegalStateException("Timed out waiting for ingest task READY for " + docId + ".");
-    }
+    // ── 等待工具 ──────────────────────────────────────────
 
     private void waitForTrace(String traceId) {
         for (int i = 0; i < 40; i++) {
@@ -632,40 +344,6 @@ public class EvalRunnerService {
         throw new IllegalStateException("Timed out waiting for QA trace " + traceId + ".");
     }
 
-    private void requireAdmin() {
-        CurrentUser currentUser = currentUserService.currentUser();
-        if (!"ADMIN".equals(currentUser.globalRole())) {
-            throw new AccessDeniedException("ADMIN access is required.");
-        }
-    }
-
-    private String findOrCreateEvalKb(LocalDateTime generatedAt) {
-        // Try to reuse an existing eval KB (prefix "评测知识库", 4 docs, all SYNCED)
-        String existingKbId = jdbcClient.sql("""
-                SELECT kb.id
-                FROM knowledge_bases kb
-                WHERE kb.name LIKE '评测知识库%'
-                  AND (SELECT COUNT(*) FROM documents WHERE kb_id = kb.id) = 12
-                  AND (SELECT COUNT(*) FROM documents WHERE kb_id = kb.id AND status = 'PUBLISHED' AND index_status = 'SYNCED') = 12
-                ORDER BY kb.created_at DESC
-                LIMIT 1
-                """)
-                .query(String.class)
-                .optional()
-                .orElse(null);
-
-        if (existingKbId != null) {
-            return existingKbId;
-        }
-
-        // Create new eval KB and seed documents
-        String kbId = knowledgeBaseService.create(new CreateKnowledgeBaseRequest(
-                "评测知识库 " + generatedAt.toString().replace(':', '-'),
-                "由基准集评测服务自动生成。")).id();
-        seedAndPublishDocuments(kbId);
-        return kbId;
-    }
-
     private static void sleep() {
         try {
             Thread.sleep(50);
@@ -675,11 +353,31 @@ public class EvalRunnerService {
         }
     }
 
-    private static String escape(String value) {
-        return value == null ? "" : value.replace("|", "\\|").replace("\n", " ");
+    // ── 权限 ──────────────────────────────────────────────
+
+    private void requireAdmin() {
+        CurrentUser currentUser = currentUserService.currentUser();
+        if (!"ADMIN".equals(currentUser.globalRole())) {
+            throw new AccessDeniedException("ADMIN access is required.");
+        }
     }
 
-    private static String formatPercent(double value) {
-        return "%.1f%%".formatted(value * 100.0d);
+    // ── 内部类型 ──────────────────────────────────────────
+
+    private record EvalRaw(ChatResponse response, GoldenCase goldenCase) {
+    }
+
+    /**
+     * 评测线程工厂，使用 daemon 线程避免阻塞 JVM 退出。
+     */
+    private static class EvalThreadFactory implements ThreadFactory {
+        private final AtomicInteger counter = new AtomicInteger(1);
+
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread t = new Thread(r, "eval-worker-" + counter.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        }
     }
 }

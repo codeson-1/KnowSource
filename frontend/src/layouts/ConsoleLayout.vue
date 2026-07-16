@@ -109,7 +109,7 @@ function isVisible(item: ConsoleNavItem) {
   if (item.label === '知识库管理' && !canManageKbs.value) {
     return false
   }
-  if (item.section === 'SYSTEM' && auth.globalRole !== 'ADMIN') {
+  if (item.requiresAdmin && auth.globalRole !== 'ADMIN') {
     return false
   }
   return true
@@ -159,13 +159,7 @@ const userInitial = computed(() => (auth.username || 'U').slice(0, 1).toUpperCas
 const userRoleClass = computed(() => `role-${(auth.globalRole || 'VIEWER').toLowerCase()}`)
 
 function isActive(item: ConsoleNavItem) {
-  if (item.exactPath === '/manage-kbs' && route.path === '/manage-kbs') {
-    return true
-  }
-  if (item.exactPath === '/kbs' && route.path === '/kbs') {
-    return true
-  }
-  if (item.exactPath === '/admin/users' && route.path === '/admin/users') {
+  if (item.exactPath && route.path === item.exactPath) {
     return true
   }
   if (kbId.value && item.tabs?.includes(routeTab.value)) {
@@ -189,7 +183,7 @@ function isLocked(item: ConsoleNavItem) {
 }
 
 function lockedHint(item: ConsoleNavItem) {
-  return item.requiresKb && !kbId.value ? '先选择' : ''
+  return lockedReason(item) ? '受限' : ''
 }
 
 async function go(item: ConsoleNavItem) {

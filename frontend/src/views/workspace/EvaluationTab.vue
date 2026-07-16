@@ -24,6 +24,22 @@ const reportDrawerVisible = ref(false)
 const history = ref<EvalHistoryItem[]>([])
 const loadingHistory = ref(false)
 const compareTimestamp = ref<string | null>(null)
+const METRICS = [
+  { label: '用例总数', key: 'totalCases' },
+  { label: '文档命中率@5', key: 'documentHitRate' },
+  { label: '引用准确率', key: 'citationHitRate' },
+  { label: '拒答准确率', key: 'refusalAccuracy' },
+  { label: '忠实度', key: 'faithfulness' },
+] as const
+
+const KPI_ITEMS = [
+  { label: '范围内用例', key: 'inScopeCases' },
+  { label: '范围外拒答', key: 'outOfScopeCases' },
+  ...METRICS,
+]
+
+const COMPARE_KEYS = METRICS.filter((m) => m.key !== 'totalCases')
+
 const canRun = computed(() => auth.globalRole === 'ADMIN')
 const renderedReport = computed(() => markdown.render(report.value?.markdown || ''))
 const parsedReport = computed(() => parseReport(report.value?.markdown || ''))
@@ -60,35 +76,17 @@ const comparison = computed<CompareRow[]>(() => {
   if (!result.value || !compareItem.value) return []
   const s = result.value.summary
   const c = compareItem.value
-  const rows: CompareRow[] = [
-    {
-      label: '文档命中率@5',
-      current: pct(s.documentHitRate),
-      compared: pct(c.documentHitRate),
-      arrow: arrowFor(s.documentHitRate, c.documentHitRate),
-    },
-    {
-      label: '引用准确率',
-      current: pct(s.citationHitRate),
-      compared: pct(c.citationHitRate),
-      arrow: arrowFor(s.citationHitRate, c.citationHitRate),
-    },
-    {
-      label: '拒答准确率',
-      current: pct(s.refusalAccuracy),
-      compared: pct(c.refusalAccuracy),
-      arrow: arrowFor(s.refusalAccuracy, c.refusalAccuracy),
-    },
-  ]
-  if (s.faithfulness != null && c.faithfulness != null) {
-    rows.push({
-      label: '忠实度',
-      current: pct(s.faithfulness),
-      compared: pct(c.faithfulness),
-      arrow: arrowFor(s.faithfulness, c.faithfulness),
-    })
-  }
-  return rows
+  return COMPARE_KEYS.map((m) => {
+    const cur = (s as any)[m.key]
+    const prev = (c as any)[m.key]
+    if (cur == null || prev == null) return null
+    return {
+      label: m.label,
+      current: typeof cur === 'number' ? pct(cur) : String(cur),
+      compared: typeof prev === 'number' ? pct(prev) : String(prev),
+      arrow: arrowFor(cur as number, prev as number),
+    }
+  }).filter(Boolean) as CompareRow[]
 })
 
 function arrowFor(current: number, compared: number): 'up' | 'down' | 'flat' {
@@ -275,25 +273,9 @@ onMounted(() => {
       />
 
       <div class="metric-grid">
-        <div class="metric">
-          <span>用例总数</span>
-          <strong>{{ latestMetrics.totalCases }}</strong>
-        </div>
-        <div class="metric">
-          <span>文档命中率@5</span>
-          <strong>{{ latestMetrics.documentHitRate }}</strong>
-        </div>
-        <div class="metric">
-          <span>引用准确率</span>
-          <strong>{{ latestMetrics.citationHitRate }}</strong>
-        </div>
-        <div class="metric">
-          <span>拒答准确率</span>
-          <strong>{{ latestMetrics.refusalAccuracy }}</strong>
-        </div>
-        <div class="metric">
-          <span>忠实度</span>
-          <strong>{{ latestMetrics.faithfulness }}</strong>
+        <div v-for="m in METRICS" :key="m.key" class="metric">
+          <span>{{ m.label }}</span>
+          <strong>{{ latestMetrics[m.key] }}</strong>
         </div>
       </div>
 
@@ -365,29 +347,9 @@ onMounted(() => {
         </div>
 
         <div class="report-kpi-list">
-          <div class="report-kpi-row">
-            <span>范围内用例</span>
-            <strong>{{ latestMetrics.inScopeCases }}</strong>
-          </div>
-          <div class="report-kpi-row">
-            <span>范围外拒答</span>
-            <strong>{{ latestMetrics.outOfScopeCases }}</strong>
-          </div>
-          <div class="report-kpi-row">
-            <span>文档命中率@5</span>
-            <strong>{{ latestMetrics.documentHitRate }}</strong>
-          </div>
-          <div class="report-kpi-row">
-            <span>引用准确率</span>
-            <strong>{{ latestMetrics.citationHitRate }}</strong>
-          </div>
-          <div class="report-kpi-row">
-            <span>拒答准确率</span>
-            <strong>{{ latestMetrics.refusalAccuracy }}</strong>
-          </div>
-          <div class="report-kpi-row">
-            <span>忠实度</span>
-            <strong>{{ latestMetrics.faithfulness }}</strong>
+          <div v-for="k in KPI_ITEMS" :key="k.key" class="report-kpi-row">
+            <span>{{ k.label }}</span>
+            <strong>{{ latestMetrics[k.key] }}</strong>
           </div>
         </div>
 

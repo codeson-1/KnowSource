@@ -13,20 +13,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import com.knowsource.security.CurrentUser;
 import com.knowsource.security.CurrentUserService;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
 /**
  * 评测历史服务 —— 负责评测报告历史的查询与解析。
- * <p>
- * 从 EvalRunnerService 拆分而来，遵循单一职责原则。
  */
 @Service
 public class EvalHistoryService {
-
-    private static final Path REPORTS_DIR = Path.of("docs/eval/reports");
 
     private final CurrentUserService currentUserService;
 
@@ -38,11 +32,11 @@ public class EvalHistoryService {
      * 列出所有评测历史记录，按生成时间倒序。
      */
     public List<EvalHistoryItem> listHistory() {
-        requireAdmin();
-        if (!Files.exists(REPORTS_DIR)) {
+        EvalConstants.requireAdmin(currentUserService);
+        if (!Files.exists(EvalConstants.REPORTS_DIR_PATH)) {
             return List.of();
         }
-        try (Stream<Path> files = Files.list(REPORTS_DIR)) {
+        try (Stream<Path> files = Files.list(EvalConstants.REPORTS_DIR_PATH)) {
             return files
                     .filter(path -> path.getFileName().toString().startsWith("report-")
                             && path.getFileName().toString().endsWith(".md"))
@@ -75,14 +69,14 @@ public class EvalHistoryService {
 
             return new EvalHistoryItem(
                     generatedAt,
-                    REPORTS_DIR.relativize(file).toString(),
+                    EvalConstants.REPORTS_DIR_PATH.relativize(file).toString(),
                     totalCases,
                     inScopeCases,
                     outOfScopeCases,
-                    parseMetricPct(metrics, "文档命中率@5"),
-                    parseMetricPct(metrics, "引用准确率"),
-                    parseMetricPct(metrics, "拒答准确率"),
-                    parseMetricDouble(metrics, "忠实度 (Faithfulness)"));
+                    parseMetricDouble(metrics, "文档命中率@5"),
+                    parseMetricDouble(metrics, "引用准确率"),
+                    parseMetricDouble(metrics, "拒答准确率"),
+                    parseMetricNullable(metrics, "忠实度 (Faithfulness)"));
         } catch (Exception ex) {
             return null;
         }
@@ -98,18 +92,14 @@ public class EvalHistoryService {
                 continue;
             }
             if (!inTable) {
-                // 提取 "生成时间: xxx" 行
                 Matcher genMatch = Pattern.compile("^生成时间:\\s*(.+)$").matcher(trimmed);
                 if (genMatch.find()) {
                     metrics.put("生成时间", genMatch.group(1).trim());
                 }
                 continue;
             }
-            if (!trimmed.startsWith("|")) {
+            if (!trimmed.startsWith("|") || trimmed.contains("---")) {
                 break;
-            }
-            if (trimmed.contains("---")) {
-                continue;
             }
             String[] cells = trimmed.split("\\|");
             if (cells.length >= 3) {
@@ -127,36 +117,33 @@ public class EvalHistoryService {
         }
     }
 
-    private static double parseMetricPct(Map<String, String> metrics, String key) {
-        String value = metrics.get(key);
-        if (value == null) {
-            return 0.0d;
-        }
-        try {
-            String num = value.replace("%", "").trim();
-            return Double.parseDouble(num) / 100.0d;
-        } catch (NumberFormatException ignored) {
-            return 0.0d;
-        }
+    /** 解析百分比值（如 "83.3%"）返回 0~1 之间的 double。 */
+    private static double parseMetricDouble(Map<String, String> metrics, String key) {
+        return parseMetricDouble(metrics, key, 0.0d);
     }
 
-    private static Double parseMetricDouble(Map<String, String> metrics, String key) {
+    /** 解析可空百分比值，缺失时为 null（如忠实度未跑出来时为 "-"）。 */
+    private static Double parseMetricNullable(Map<String, String> metrics, String key) {
         String value = metrics.get(key);
         if (value == null || "-".equals(value.trim())) {
             return null;
         }
-        try {
-            String num = value.replace("%", "").trim();
-            return Double.parseDouble(num) / 100.0d;
-        } catch (NumberFormatException ignored) {
-            return null;
-        }
+        return parseDoubleFromPct(value.trim());
     }
 
-    private void requireAdmin() {
-        CurrentUser currentUser = currentUserService.currentUser();
-        if (!"ADMIN".equals(currentUser.globalRole())) {
-            throw new AccessDeniedException("ADMIN access is required.");
+    private static double parseMetricDouble(Map<String, String> metrics, String key, double defaultVal) {
+        String value = metrics.get(key);
+        if (value == null) {
+            return defaultVal;
+        }
+        return parseDoubleFromPct(value.trim());
+    }
+
+    private static double parseDoubleFromPct(String value) {
+        try {
+            return Double.parseDouble(value.replace("%", "").trim()) / 100.0d;
+        } catch (NumberFormatException ignored) {
+            return 0.0d;
         }
     }
 }

@@ -40,6 +40,15 @@ spring:
       embedding:
         options:
           model: ${AI_DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+    # 关闭 Spring AI 内置 RetryTemplate，避免 429/超时触发重试风暴。
+    # 评测场景的容错由 Resilience4j 本地限流器和 Bulkhead 控制；超时由 AiHttpClientConfig 控制。
+    retry:
+      max-attempts: ${KNOWSOURCE_AI_RETRY_MAX_ATTEMPTS:1}
+      backoff:
+        initial-interval: ${KNOWSOURCE_AI_RETRY_BACKOFF_INITIAL_MILLIS:1000ms}
+        multiplier: ${KNOWSOURCE_AI_RETRY_BACKOFF_MULTIPLIER:2}
+        max-interval: ${KNOWSOURCE_AI_RETRY_BACKOFF_MAX_MILLIS:5000ms}
+      on-client-errors: false
     vectorstore:
       pgvector:
         initialize-schema: false

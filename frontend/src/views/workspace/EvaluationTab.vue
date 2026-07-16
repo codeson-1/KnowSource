@@ -4,10 +4,10 @@ import { ElMessage } from 'element-plus'
 import { Refresh, VideoPlay, View } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 
-import { getGoldenSetReport, runGoldenSet } from '@/api/eval'
+import { getGoldenSetHistory, getGoldenSetReport, runGoldenSet } from '@/api/eval'
 import { extractErrorMessage } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
-import type { EvalReportResponse, EvalRunResponse } from '@/types/api'
+import type { EvalHistoryItem, EvalReportResponse, EvalRunResponse } from '@/types/api'
 
 const markdown = new MarkdownIt({
   html: false,
@@ -21,6 +21,9 @@ const loadingReport = ref(false)
 const result = ref<EvalRunResponse | null>(null)
 const report = ref<EvalReportResponse | null>(null)
 const reportDrawerVisible = ref(false)
+const history = ref<EvalHistoryItem[]>([])
+const loadingHistory = ref(false)
+const compareTimestamp = ref<string | null>(null)
 const canRun = computed(() => auth.globalRole === 'ADMIN')
 const renderedReport = computed(() => markdown.render(report.value?.markdown || ''))
 const parsedReport = computed(() => parseReport(report.value?.markdown || ''))
@@ -41,6 +44,59 @@ const latestMetrics = computed(() => ({
     ? (result.value.summary.faithfulness != null ? pct(result.value.summary.faithfulness) : '-')
     : metricValue('忠实度', 'Faithfulness'),
 }))
+
+const compareItem = computed(() => {
+  if (!compareTimestamp.value) return null
+  return history.value.find((h) => h.generatedAt === compareTimestamp.value) || null
+})
+
+interface CompareRow {
+  label: string
+  current: string
+  compared: string
+  arrow: 'up' | 'down' | 'flat'
+}
+const comparison = computed<CompareRow[]>(() => {
+  if (!result.value || !compareItem.value) return []
+  const s = result.value.summary
+  const c = compareItem.value
+  const rows: CompareRow[] = [
+    {
+      label: '文档命中率@5',
+      current: pct(s.documentHitRate),
+      compared: pct(c.documentHitRate),
+      arrow: arrowFor(s.documentHitRate, c.documentHitRate),
+    },
+    {
+      label: '引用准确率',
+      current: pct(s.citationHitRate),
+      compared: pct(c.citationHitRate),
+      arrow: arrowFor(s.citationHitRate, c.citationHitRate),
+    },
+    {
+      label: '拒答准确率',
+      current: pct(s.refusalAccuracy),
+      compared: pct(c.refusalAccuracy),
+      arrow: arrowFor(s.refusalAccuracy, c.refusalAccuracy),
+    },
+  ]
+  if (s.faithfulness != null && c.faithfulness != null) {
+    rows.push({
+      label: '忠实度',
+      current: pct(s.faithfulness),
+      compared: pct(c.faithfulness),
+      arrow: arrowFor(s.faithfulness, c.faithfulness),
+    })
+  }
+  return rows
+})
+
+function arrowFor(current: number, compared: number): 'up' | 'down' | 'flat' {
+  const diff = current - compared
+  if (diff > 0.001) return 'up'
+  if (diff < -0.001) return 'down'
+  return 'flat'
+}
 const failedCases = computed(() => {
   if (result.value) {
     return result.value.cases
@@ -161,6 +217,7 @@ async function run() {
     result.value = await runGoldenSet()
     ElMessage.success('基准集评测完成')
     await loadReport()
+    await loadHistory()
   } catch (error) {
     ElMessage.error(extractErrorMessage(error))
   } finally {
@@ -179,7 +236,21 @@ async function loadReport() {
   }
 }
 
-onMounted(loadReport)
+async function loadHistory() {
+  loadingHistory.value = true
+  try {
+    history.value = await getGoldenSetHistory()
+  } catch {
+    // silently ignore — history is non-critical
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+onMounted(() => {
+  loadReport()
+  loadHistory()
+})
 </script>
 
 <template>
@@ -318,6 +389,42 @@ onMounted(loadReport)
             <span>忠实度</span>
             <strong>{{ latestMetrics.faithfulness }}</strong>
           </div>
+        </div>
+
+        <!-- History comparison -->
+        <div v-if="history.length > 1" class="history-compare">
+          <div class="section-heading compact">
+            <div>
+              <h3>历史对比</h3>
+              <p>选择历史评测，与本次结果对比核心指标变化。</p>
+            </div>
+          </div>
+          <el-select
+            v-model="compareTimestamp"
+            placeholder="选择历史评测"
+            clearable
+            :loading="loadingHistory"
+            style="width: 100%; margin-bottom: 8px"
+            popper-class="compact-dropdown"
+          >
+            <el-option
+              v-for="item in history"
+              :key="item.generatedAt"
+              :label="formatDate(item.generatedAt)"
+              :value="item.generatedAt"
+            />
+          </el-select>
+          <div v-if="comparison.length" class="compare-grid">
+            <div v-for="row in comparison" :key="row.label" class="compare-row">
+              <span class="compare-label">{{ row.label }}</span>
+              <span class="compare-value">{{ row.current }}</span>
+              <span v-if="row.arrow === 'up'" class="compare-diff up">↑</span>
+              <span v-else-if="row.arrow === 'down'" class="compare-diff down">↓</span>
+              <span v-else class="compare-diff flat">→</span>
+              <span class="compare-value-old">{{ row.compared }}</span>
+            </div>
+          </div>
+          <div v-else-if="compareTimestamp" class="empty-state">选择历史节点后可对比指标变化。</div>
         </div>
 
         <div class="report-conclusion">

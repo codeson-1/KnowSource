@@ -894,6 +894,61 @@ h3 {
   font-weight: 800;
 }
 
+.history-compare {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ks-line);
+}
+
+.compare-grid {
+  display: grid;
+  gap: 4px;
+}
+
+.compare-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.compare-label {
+  color: var(--ks-muted);
+  min-width: 104px;
+}
+
+.compare-value {
+  color: var(--ks-ink);
+  font-weight: 800;
+  min-width: 48px;
+  text-align: right;
+}
+
+.compare-diff {
+  min-width: 24px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.compare-diff.up {
+  color: #16a34a;
+}
+
+.compare-diff.down {
+  color: #dc2626;
+}
+
+.compare-diff.flat {
+  color: var(--ks-muted);
+}
+
+.compare-value-old {
+  color: var(--ks-muted);
+  min-width: 48px;
+}
+
 .report-conclusion {
   margin-top: 16px;
 }

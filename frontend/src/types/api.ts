@@ -266,3 +266,15 @@ export interface EvalReportResponse {
   reportPath: string
   markdown: string
 }
+
+export interface EvalHistoryItem {
+  generatedAt: string
+  reportPath: string
+  totalCases: number
+  inScopeCases: number
+  outOfScopeCases: number
+  documentHitRate: number
+  citationHitRate: number
+  refusalAccuracy: number
+  faithfulness: number | null
+}

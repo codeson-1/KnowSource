@@ -1,5 +1,7 @@
 package com.knowsource.eval;
 
+import java.util.List;
+
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -23,5 +25,10 @@ public class EvalController {
     @GetMapping("/golden-set/report")
     public EvalReportResponse latestReport() {
         return evalRunnerService.latestReport();
+    }
+
+    @GetMapping("/golden-set/history")
+    public List<EvalHistoryItem> history() {
+        return evalRunnerService.listHistory();
     }
 }

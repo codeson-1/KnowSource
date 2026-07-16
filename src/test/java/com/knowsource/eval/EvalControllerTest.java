@@ -6,20 +6,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Set;
-
-import com.knowsource.chat.AnswerGenerator;
-import com.knowsource.index.DocumentEmbeddingGateway;
 import com.knowsource.user.DemoUserInitializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
@@ -29,15 +22,16 @@ import org.springframework.test.web.servlet.MockMvc;
 @AutoConfigureMockMvc
 @ActiveProfiles("db")
 @WithMockUser(username = "demo", roles = "ADMIN")
+@Import(EvalTestConfig.class)
 class EvalControllerTest {
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     private MockMvc mockMvc;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     private JdbcClient jdbcClient;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     private DemoUserInitializer demoUserInitializer;
 
     @BeforeEach
@@ -77,99 +71,5 @@ class EvalControllerTest {
         mockMvc.perform(get("/api/eval/golden-set/report"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.markdown").value(org.hamcrest.Matchers.containsString("KnowSource 评测报告")));
-    }
-
-    @TestConfiguration
-    static class EvalEmbeddingConfig {
-
-        @Bean
-        DocumentEmbeddingGateway documentEmbeddingGateway() {
-            return new DocumentEmbeddingGateway() {
-                @Override
-                public List<float[]> embed(List<String> texts) {
-                    return embedDocuments(texts);
-                }
-
-                @Override
-                public List<float[]> embedDocuments(List<String> texts) {
-                    return texts.stream().map(EvalEmbeddingConfig::embedding).toList();
-                }
-
-                @Override
-                public List<float[]> embedQuery(String text) {
-                    return List.of(embedding(text));
-                }
-            };
-        }
-
-        @Bean
-        AnswerGenerator answerGenerator() {
-            return (question, sources) -> "评测回答：" + question;
-        }
-
-        private static float[] embedding(String text) {
-            Set<String> categories = categories(text);
-            float[] embedding = new float[1024];
-            if (categories.contains("leave")) {
-                embedding[0] = 1.0f;
-            }
-            if (categories.contains("security")) {
-                embedding[1] = 1.0f;
-            }
-            if (categories.contains("expense")) {
-                embedding[2] = 1.0f;
-            }
-            if (categories.contains("remote")) {
-                embedding[3] = 1.0f;
-            }
-            if (categories.isEmpty()) {
-                embedding[10] = 1.0f;
-            }
-            return embedding;
-        }
-
-        private static Set<String> categories(String text) {
-            String normalized = text.toLowerCase(Locale.ROOT);
-            java.util.LinkedHashSet<String> categories = new java.util.LinkedHashSet<>();
-            if (containsAny(normalized,
-                    "leave", "annual", "approve", "approval", "manager",
-                    "年假", "假期", "休年假", "直属经理", "hr", "复核", "全职")) {
-                categories.add("leave");
-            }
-            if (containsAny(normalized, "carryover", "unused", "结转", "未使用", "leave-2024")) {
-                categories.add("leave");
-            }
-            if (containsAny(normalized,
-                    "security", "badge", "office", "visitor", "lost",
-                    "安全", "工牌", "办公区", "访客", "前台", "丢失", "门禁")) {
-                categories.add("security");
-            }
-            if (containsAny(normalized, "incident", "24 hours", "事件", "24 小时", "24小时", "上报", "p0")) {
-                categories.add("security");
-            }
-            if (containsAny(normalized,
-                    "expense", "reimbursement", "receipt", "finance", "lodging",
-                    "报销", "票据", "财务", "住宿", "额度", "餐费", "交通")) {
-                categories.add("expense");
-            }
-            if (containsAny(normalized, "limit", "800", "exp")) {
-                categories.add("expense");
-            }
-            if (containsAny(normalized,
-                    "remote", "work", "week", "vpn",
-                    "远程", "办公", "每周", "团队负责人", "线下培训")) {
-                categories.add("remote");
-            }
-            return categories;
-        }
-
-        private static boolean containsAny(String text, String... terms) {
-            for (String term : terms) {
-                if (text.contains(term)) {
-                    return true;
-                }
-            }
-            return false;
-        }
     }
 }

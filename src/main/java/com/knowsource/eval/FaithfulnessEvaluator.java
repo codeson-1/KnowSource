@@ -26,6 +26,8 @@ public class FaithfulnessEvaluator {
 
     private static final Pattern SCORE_PATTERN = Pattern.compile("\"faithful\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE);
     private static final Pattern VALUE_PATTERN = Pattern.compile("\"score\"\\s*:\\s*([\\d.]+)");
+    /** 匹配 ```json ... ``` 或 ``` ... ``` 包裹的代码块 */
+    private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile("(?s)```(?:json)?\\s*(.*?)\\s*```");
 
     private final ObjectProvider<AnswerGenerator> answerGeneratorProvider;
     private final ObjectMapper objectMapper;
@@ -64,7 +66,14 @@ public class FaithfulnessEvaluator {
         String prompt = buildPrompt(question, answer, contextText);
         try {
             String response = judge.generate(prompt, List.of());
-            return parseScore(response);
+            Double score = parseScore(response);
+            if (score != null) {
+                log.debug("Faithfulness score for '{}': {}", question, score);
+            } else {
+                log.warn("Faithfulness score is null for question '{}', raw response: {}", question,
+                        response == null ? "<null>" : (response.length() > 200 ? response.substring(0, 200) + "..." : response));
+            }
+            return score;
         } catch (Exception e) {
             log.warn("Faithfulness evaluation failed for question '{}': {}", question, e.getMessage());
             return null;
@@ -99,27 +108,47 @@ public class FaithfulnessEvaluator {
 
                 回答：%s
 
-                请仅输出一个JSON对象（不要包含任何其他文本）：
-                {"faithful": true或false, "score": 0.0到1.0之间的数值, "reasoning": "用中文简述判定理由"}
+                请仅输出一个JSON对象（不要包含markdown代码块标记、不要包含任何其他文本）。
+                示例格式如下，请替换为实际判定值：
+                {"faithful": true, "score": 0.8, "reasoning": "回答中的2条陈述均可从上下文推导，1条无法验证"}
                 """.formatted(contextText, question, answer);
     }
 
+    /**
+     * 解析 LLM 返回的 Faithfulness 评分。
+     * <p>
+     * 解析顺序：
+     * <ol>
+     *   <li>清理 markdown 代码块标记后尝试 JSON 解析</li>
+     *   <li>JSON score 字段 → clamp 后返回</li>
+     *   <li>JSON 有 faithful 但无 score → true=1.0, false=0.0</li>
+     *   <li>正则提取 "score": 数字</li>
+     *   <li>正则提取 "faithful": true/false</li>
+     *   <li>全部失败 → null</li>
+     * </ol>
+     */
     Double parseScore(String llmResponse) {
         if (llmResponse == null || llmResponse.isBlank()) {
             return null;
         }
 
-        // Try parsing as JSON first
+        String cleaned = stripCodeBlock(llmResponse).strip();
+
+        // 1. Try parsing as JSON first
         try {
-            FaithfulnessResult result = objectMapper.readValue(llmResponse.strip(), FaithfulnessResult.class);
+            FaithfulnessResult result = objectMapper.readValue(cleaned, FaithfulnessResult.class);
             if (result.score != null) {
                 return clampScore(result.score);
+            }
+            // JSON 解析成功但 score 为 null，用 faithful 字段兜底
+            if (result.faithful != null) {
+                return result.faithful ? 1.0d : 0.0d;
             }
         } catch (JsonProcessingException ignored) {
             // Fall through to regex extraction
         }
 
-        // Regex fallback: extract score from partial/incomplete JSON
+        // 2. Regex fallback: extract score from partial/incomplete JSON
         Matcher valueMatcher = VALUE_PATTERN.matcher(llmResponse);
         if (valueMatcher.find()) {
             try {
@@ -128,13 +157,25 @@ public class FaithfulnessEvaluator {
             }
         }
 
-        // Last resort: check if "faithful": true/false exists
+        // 3. Last resort: check if "faithful": true/false exists
         Matcher faithfulMatcher = SCORE_PATTERN.matcher(llmResponse);
         if (faithfulMatcher.find()) {
             return "true".equalsIgnoreCase(faithfulMatcher.group(1)) ? 1.0d : 0.0d;
         }
 
         return null;
+    }
+
+    /**
+     * 去除 LLM 响应外层包裹的 markdown 代码块标记（```json ... ``` 或 ``` ... ```）。
+     * 如果没有代码块包裹，原样返回。
+     */
+    private static String stripCodeBlock(String response) {
+        Matcher matcher = CODE_BLOCK_PATTERN.matcher(response);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return response;
     }
 
     private static double clampScore(double score) {

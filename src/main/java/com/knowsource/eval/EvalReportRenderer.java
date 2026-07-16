@@ -3,7 +3,6 @@ package com.knowsource.eval;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -12,21 +11,12 @@ import org.springframework.stereotype.Component;
 
 /**
  * 评测报告渲染器 —— 负责将评测结果渲染为 Markdown 报告并写入文件系统。
- * <p>
- * 从 EvalRunnerService 拆分而来，遵循单一职责原则。
  */
 @Component
 public class EvalReportRenderer {
 
-    static final Path REPORT = Path.of("docs/eval/report.md");
-    static final Path REPORTS_DIR = Path.of("docs/eval/reports");
-
     /**
      * 渲染 Markdown 格式的评测报告并写入文件。
-     *
-     * @param generatedAt 报告生成时间
-     * @param summary     评测汇总指标
-     * @param results     逐条用例结果
      */
     public void renderAndWrite(LocalDateTime generatedAt, EvalSummaryResponse summary, List<EvalCaseResponse> results) {
         String report = renderMarkdown(generatedAt, summary, results);
@@ -77,23 +67,22 @@ public class EvalReportRenderer {
 
     private void writeToFiles(String report, LocalDateTime generatedAt) {
         try {
-            Files.createDirectories(REPORT.getParent());
-            Files.writeString(REPORT, report, StandardCharsets.UTF_8);
+            Files.createDirectories(EvalConstants.REPORT_PATH.getParent());
+            Files.writeString(EvalConstants.REPORT_PATH, report, StandardCharsets.UTF_8);
 
-            // 归档带时间戳的副本用于历史对比
             String timestamp = generatedAt.format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            Files.createDirectories(REPORTS_DIR);
-            Files.writeString(REPORTS_DIR.resolve("report-" + timestamp + ".md"), report, StandardCharsets.UTF_8);
+            Files.createDirectories(EvalConstants.REPORTS_DIR_PATH);
+            Files.writeString(EvalConstants.REPORTS_DIR_PATH.resolve("report-" + timestamp + ".md"), report, StandardCharsets.UTF_8);
         } catch (IOException ex) {
             throw new IllegalStateException("Failed to write eval report.", ex);
         }
     }
 
-    static String escape(String value) {
+    public static String escape(String value) {
         return value == null ? "" : value.replace("|", "\\|").replace("\n", " ");
     }
 
-    static String formatPercent(double value) {
+    public static String formatPercent(double value) {
         return "%.1f%%".formatted(value * 100.0d);
     }
 }

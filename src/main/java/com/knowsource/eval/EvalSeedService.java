@@ -13,8 +13,6 @@ import org.springframework.stereotype.Service;
 
 /**
  * 评测种子任务服务 —— 负责评测知识库的创建/复用与种子文档的写入发布。
- * <p>
- * 从 EvalRunnerService 拆分而来，遵循单一职责原则。
  */
 @Service
 public class EvalSeedService {
@@ -40,12 +38,8 @@ public class EvalSeedService {
      * <p>
      * 优先复用已有的评测知识库（名称以"评测知识库"开头、含 12 篇文档且全部 SYNCED），
      * 避免重复创建导致 KB 累积。如果不存在则新建并种子文档。
-     *
-     * @param generatedAt 评测生成时间，用于命名新知识库
-     * @return 知识库 ID
      */
     public String findOrCreateEvalKb(LocalDateTime generatedAt) {
-        // P2-2: 复用已有的评测知识库
         String existingKbId = jdbcClient.sql("""
                 SELECT kb.id
                 FROM knowledge_bases kb
@@ -63,7 +57,6 @@ public class EvalSeedService {
             return existingKbId;
         }
 
-        // 新建评测知识库并种子文档
         String kbId = knowledgeBaseService.create(new CreateKnowledgeBaseRequest(
                 "评测知识库 " + generatedAt.toString().replace(':', '-'),
                 "由基准集评测服务自动生成。")).id();
@@ -71,9 +64,6 @@ public class EvalSeedService {
         return kbId;
     }
 
-    /**
-     * 创建并发布全部 12 篇种子文档（4 篇目标 + 8 篇干扰）。
-     */
     private void seedAndPublishDocuments(String kbId) {
         publishDocument(createDocument(kbId, "年假制度",
                 """
@@ -129,7 +119,6 @@ public class EvalSeedService {
 
                         员工获得团队负责人审批后，每周可以远程办公 2 天。强制线下培训日不得安排远程办公。VPN 断线需 15 分钟内上报。
                         """));
-        // 干扰文档 —— 与目标文档语义相近但不含制度编号，用于逼出 hybrid 的关键词匹配优势
         publishDocument(createDocument(kbId, "考勤管理制度",
                 """
                         # 考勤管理制度
@@ -166,7 +155,6 @@ public class EvalSeedService {
 
                         禁止在公共 Wi-Fi 环境下访问公司内网。敏感数据传输必须使用加密通道。
                         """));
-        // 第二批干扰文档 —— 进一步压缩语义空间
         publishDocument(createDocument(kbId, "员工培训管理制度",
                 """
                         # 员工培训管理制度
@@ -243,7 +231,7 @@ public class EvalSeedService {
     }
 
     private void waitForIngestReady(String docId) {
-        for (int i = 0; i < 120; i++) {
+        for (int i = 0; i < EvalConstants.MAX_INGEST_POLLS; i++) {
             String status = jdbcClient.sql("""
                     SELECT status
                     FROM ingest_tasks
@@ -257,17 +245,8 @@ public class EvalSeedService {
             if ("READY".equals(status)) {
                 return;
             }
-            sleep();
+            EvalConstants.sleep();
         }
         throw new IllegalStateException("Timed out waiting for ingest task READY for " + docId + ".");
-    }
-
-    private static void sleep() {
-        try {
-            Thread.sleep(50);
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting for eval state.", ex);
-        }
     }
 }

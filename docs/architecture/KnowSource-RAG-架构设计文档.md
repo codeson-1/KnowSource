@@ -4,7 +4,7 @@
 
 | 属性 | 内容 |
 |------|------|
-| 文档版本 | V1.1-现实化修订 |
+| 文档版本 | V1.2-Redis 引入修订 |
 | 编制 | 个人（面试项目） |
 | 编制日期 | 2026-06-21 |
 | 项目名称 | KnowSource |
@@ -14,6 +14,7 @@
 
 | 版本 | 日期 | 修订人 | 变更说明 |
 |------|------|--------|----------|
+| V1.2-Redis 引入 | 2026-07-05 | 个人 | **Redis 引入修订**：依据 `docs/architecture/Redis引入设计文档.md` 完成 P0+P1 落地，本档同步对齐。核心变更——(1) 引入 Redisson 3.27.2 作为 Redis 客户端，`redisson-spring-boot-starter` 自动配置 `RedissonClient` / `RedisConnectionFactory` / `StringRedisTemplate`；(2) 新增 `RedisConfig`（仅自定义 `RedisTemplate<String,Object>`，受 `knowsource.redis.enabled` 门控）+ `CacheKeys` + `CacheService`（集中封装 + 优雅降级）+ `DistributedRateLimiter`（基于 `RRateLimiter`）；(3) `AiProviderResilience.execute()` 链前置分布式限流，Redis 不可用时降级为本地 resilience4j；(4) `CurrentUserService.findByUsername` + `KnowledgeBaseService.cachedMemberRole` 走 Redis 缓存，TTL 30s/60s，所有写点同步 evict；(5) docker-compose 加入 redis 服务（端口 16379）；(6) 测试 profile `db` 排除 `RedissonAutoConfigurationV2`，集成测试零 Redis 依赖；(7) 一键回滚开关 `knowsource.redis.enabled=false` |
 | V1.0-MVP | 2026-06-21 | 个人 | 初版：MVP 架构设计全文 |
 | V1.0-MVP-P0 | 2026-06-21 | 个人 | P0 修订：延迟向量化、发布 Outbox、检索列化、RAG 路由、轻量 Rerank |
 | V1.0-MVP-P0-rev1 | 2026-06-22 | 个人 | 架构审查修订：检索 `(doc_id, doc_version)` 精确匹配、Outbox 生产字段、chunk 版本化、W1 Spike、上传与令牌治理 |
@@ -152,10 +153,12 @@ KnowSource 定位为 **企业智能知识库问答平台**，核心能力链路�
 | 部门 / 租户级向量隔离 | 列入目标架构（第 15.4 节） |
 | 文档密级、知识空间细粒度 ACL | 同上 |
 | Graph RAG、多模态、Agent 工具调用 | 第 15 章演进 |
-| Redis 缓存、独立向量数据库（Milvus 等） | MVP 使用同库 PGVector |
+| 独立向量数据库（Milvus 等） | MVP 使用同库 PGVector |
 | Kafka / RocketMQ 异步入库 | MVP 使用 `@Async` + DB 状态机 |
 | K8s 集群部署 | MVP 使用 Docker Compose |
 | 自动化 RAGAS CI 门禁 | MVP 使用 JUnit + golden set |
+
+> **⚠️ 边界更正（V1.2 Redis 引入修订）：** 早期 §2.4 曾把「Redis 缓存」整体列为 Out of Scope。**V1.2 已将 Redis 引入**（基于 Redisson 3.27.2，详见 §7.8 与 `docs/architecture/Redis引入设计文档.md`），P0 分布式限流 + P1 用户/KB 成员缓存已落地。仍属 Out of Scope 的是：**embedding/答案缓存**（P2，需按内容 hash + 方向分区）、**refresh-token Redis 化与 JWT 黑名单**（P3，需重写 `refresh_tokens` 持久化路径）、**poller 选主与 eval pub/sub**（P3，见 §15.5）。
 
 > **⚠️ 边界更正（V1.1 现实化）：** 早期文档（§7.4.5、§15.2）曾把**混合检索**与 **OCR** 列为 v1.1 / 未来演进。实际代码这两项均已落地——混合检索是默认生产路径（§7.4），OCR 为可选能力（默认关闭，§7.2.3）。因此它们**不再属于 Out of Scope**，已上移至 §2.3 F-15/F-17。仍属 Out of Scope 的是：**多模态向量检索**（VL Embedding）、**Graph RAG**、**Agent 工具调用**（§15）。
 
@@ -245,18 +248,18 @@ flowchart LR
 
 | 类别 | 要求 |
 |------|------|
-| 性能 | 入库解析异步不阻塞上传；单轮问答 P95 < 5s、首 token < 2.5s；多轮 Modular P95 < 10s |
+| 性能 | 入库解析异步不阻塞上传；单轮问答 P95 < 5s、首 token < 2.5s；多轮 Modular P95 < 10s；热路径 DB 查询经 Redis 缓存（用户 30s TTL、KB 成员 60s TTL） |
 | 安全 | JWT + RBAC + refreshToken；**草稿不向量化**；检索 `(doc_id, doc_version)` 精确匹配；上传/MIME/大小限制（§8.6）；密钥环境变量注入；生产 HTTPS |
-| 可用性 | 入库/索引失败可重试（解析仅手动重试，Outbox 索引自动退避重试）；索引侧僵死回收已实现，解析侧僵死回收未实现（§7.3.1）；ChatMemory 存 DB 重启不丢会话 |
+| 可用性 | 入库/索引失败可重试（解析仅手动重试，Outbox 索引自动退避重试）；索引侧僵死回收已实现，解析侧僵死回收未实现（§7.3.1）；ChatMemory 存 DB 重启不丢会话；**Redis 不可用优雅降级**——所有 Redis 调用经 `CacheService` 集中封装，异常一律 catch → fallthrough 到原 DB / 本地限流，业务不阻塞（§7.8） |
 | 可观测 | Actuator + Micrometer + QaTrace 表 |
 | 可扩展 | 检索/写入/模型调用分层解耦，通过手写 service + 配置替换向量库与模型 |
-| 可部署 | Docker Compose 提供 PostgreSQL；应用（Maven）与前端（Vite）本地启动（§13.1） |
+| 可部署 | Docker Compose 提供 PostgreSQL + Redis；应用（Maven）与前端（Vite）本地启动（§13.1） |
 
 ### 3.4 约束与假设
 
 - 依赖 DashScope 云端 API，需稳定网络与有效 API Key；
-- MVP 单实例部署，不使用 Redis；
 - 业务表与向量数据存储于**同一 PostgreSQL 实例**；
+- Redis 单实例（Redisson 单节点模式）；多实例扩容时分布式限流自动生效，单实例时退化为本地兜底（§7.8）；
 - 文档以中文企业制度/流程类为主，电子文档为主（非扫描件为主）；
 - 单人开发，周期 2–3 个月（12 周计划）。
 
@@ -308,6 +311,7 @@ flowchart TB
         Tika[TikaDocumentReader]
         Splitter[TokenTextSplitter]
         PG[(PostgreSQL + pgvector)]
+        Redis[(Redis 7 + Redisson)]
     end
     Vue3 --> REST
     REST --> SSE
@@ -318,16 +322,19 @@ flowchart TB
     Retriever --> PG
     IngestSvc --> OSS
     IngestSvc --> Tika
+    AuthSvc -.缓存.- Redis
+    KbSvc -.缓存.- Redis
+    ChatSvc -.分布式限流.- Redis
 ```
 
 #### 各层职责
 
 | 层级 | 核心职责 | 主要组件 |
 |------|----------|----------|
-| 数据接入层 | 文件存储、解析、切块、向量化、持久化 | OSS/本地存储、Tika、`SimpleTextChunker`、`VectorIndexService`（JdbcClient 直写向量）、Flyway |
+| 数据接入层 | 文件存储、解析、切块、向量化、持久化、缓存与分布式协调 | OSS/本地存储、Tika、`SimpleTextChunker`、`VectorIndexService`（JdbcClient 直写向量）、Flyway、Redis（用户/KB 成员缓存 + 分布式限流，§7.8） |
 | 模型服务层 | 统一封装 LLM / Embedding / Rerank 调用 | DashScope（OpenAI 兼容）ChatModel、`DashScopeEmbeddingGateway`、`DashScopeDocumentReranker` |
 | 检索引擎层 | Query 改写、向量检索、词法检索、RRF 融合、Rerank | `RetrievalService`、`VectorSearchService`、`LexicalRetriever`、`RetrievalFusionService` |
-| 业务服务层 | 领域逻辑、权限、状态机、审计 | `KnowledgeBaseService`、`DocumentService`、`ChatService` |
+| 业务服务层 | 领域逻辑、权限、状态机、审计 | `KnowledgeBaseService`、`DocumentService`、`ChatService`、`AuthService`（均通过 `CacheService` 走缓存） |
 | 交互接入层 | API、流式协议、前端、文档 | Controller、Knife4j、Vue3 |
 
 > **⚠️ 实现说明（V1.1 现实化）：** 上方逻辑分层图沿用了早期基于 Spring AI Advisor 的设计叙事（`RetrievalAugmentationAdvisor` / `VectorStoreDocumentRetriever` / `DocumentPostProcessor`）。这些 Advisor 组件在 W1 技术 Spike 中验证过，但**生产问答链路最终采用手写 service 编排**，不走 Advisor 链。真实调用链为：
@@ -350,6 +357,7 @@ flowchart LR
     User[用户浏览器] --> Vue3
     Vue3 -->|HTTPS REST/SSE| App[Spring Boot 3.5 KnowSource]
     App --> PG[(PostgreSQL 16 + pgvector)]
+    App --> Redis[(Redis 7 + Redisson)]
     App --> OSS[阿里云 OSS]
     App --> DS[DashScope API]
     App --> Knife4j
@@ -361,10 +369,11 @@ flowchart LR
 | AI 框架 | Spring AI 1.1.2、`spring-ai-starter-model-openai`（OpenAI 兼容模式接入 DashScope） |
 | 业务持久化 | SQL-first JdbcClient + Flyway |
 | 向量持久化 | 同库 pgvector；由 `VectorIndexService` 手写 SQL 直写（非 PgVectorStore Bean） |
+| 缓存与分布式协调 | Redis 7（`redis:7-alpine` 容器，宿主 16379）+ Redisson 3.27.2（`redisson-spring-boot-starter`，提供 `RRateLimiter` / `RedissonClient` / `RedisConnectionFactory`）；用户缓存 + KB 成员缓存 + 分布式限流，Redis 不可用时优雅降级（§7.8） |
 | 文件存储 | 阿里云 OSS / 本地存储（可配置） |
 | 前端 | Vue 3 + Element Plus + Vite |
 | API 文档 | Knife4j（OpenAPI 3） |
-| 部署 | Docker Compose（PostgreSQL）+ 应用本地启动（§13.1） |
+| 部署 | Docker Compose（PostgreSQL + Redis）+ 应用本地启动（§13.1） |
 
 ### 4.4 核心数据流
 
@@ -461,10 +470,12 @@ flowchart TB
         FE["frontend (Vite dev server)"]
         subgraph compose [Docker Compose]
             PG["postgres:16-pgvector (宿主 15432→容器 5432)"]
+            Redis["redis:7-alpine (宿主 16379→容器 6379)"]
         end
     end
     FE --> App
     App --> PG
+    App -.缓存/限流.- Redis
     App --> OSS_EXT[阿里云 OSS / 本地存储]
     App --> DS_EXT[DashScope API OpenAI兼容]
     Browser[浏览器] --> FE
@@ -473,10 +484,11 @@ flowchart TB
 | 服务 | 构建/启动 | 端口 | 说明 |
 |------|-----------|------|------|
 | postgres | `docker compose up -d`（pgvector/pgvector:pg16） | 宿主 15432 | 业务表 + 向量表 |
+| redis | `docker compose up -d`（redis:7-alpine） | 宿主 16379 | 缓存 + 分布式限流；可经 `KNOWSOURCE_REDIS_ENABLED=false` 关闭 |
 | knowsource-app | `mvn spring-boot:run` | 8080 | Spring Boot 应用（本地启动） |
 | frontend | `npm run dev`（Vite） | Vite 端口 | 前端（本地启动） |
 
-> **说明（V1.1 现实化）：** compose 仅提供 PostgreSQL，应用与前端本地启动（§13.1）。
+> **说明（V1.2 Redis 引入修订）：** compose 现提供 PostgreSQL + Redis 两个服务，应用与前端本地启动（§13.1）。Redis 失联不影响业务正确性，仅退化为本地兜底（§7.8）。
 
 **环境变量（`.env.example`）：**
 
@@ -491,6 +503,15 @@ OSS_ENDPOINT=
 OSS_ACCESS_KEY_ID=
 OSS_ACCESS_KEY_SECRET=
 OSS_BUCKET=
+# Redis（V1.2 新增）
+KNOWSOURCE_REDIS_ENABLED=true
+KNOWSOURCE_REDIS_URL=redis://localhost:16379
+KNOWSOURCE_REDIS_PASSWORD=
+# 缓存 TTL（可选，缺省 30s/60s）
+KNOWSOURCE_CACHE_USER_ENABLED=true
+KNOWSOURCE_CACHE_USER_TTL_SECONDS=30
+KNOWSOURCE_CACHE_KB_MEMBER_ENABLED=true
+KNOWSOURCE_CACHE_KB_MEMBER_TTL_SECONDS=60
 ```
 
 ---
@@ -509,6 +530,7 @@ OSS_BUCKET=
 | 基座大模型 | DashScope `qwen-plus`（OpenAI 兼容端点） | GPT-4o、DeepSeek、本地 Ollama | 中文制度文档理解好、国内稳定 | `ChatModel` 抽象 + 配置切换 |
 | 文档解析 | Spring AI `TikaDocumentReader` + Markdown 结构解析 | POI 自研、pdfbox | 20+ 格式统一输出；含可选本地 OCR（默认关闭） | 扫描件走本地 tesseract OCR（§7.2.3） |
 | 文件存储 | 阿里云 OSS / 本地存储 | 本地磁盘、MinIO | 原文件与向量分离；预签名/本地预览 | 路径规范 `{kbId}/{docId}/{version}/` |
+| 缓存与分布式协调（V1.2 新增） | Redis 7 + Redisson 3.27.2 | Caffeine（仅本地）、Lettuce 直连 | RRateLimiter 解决多实例限流正确性；用户/KB 成员缓存消除热路径 DB 查询；与 `spring-boot-starter-data-redis` 无缝整合 | `ObjectProvider` + `knowsource.redis.enabled` 门控双保险，Redis 全失联仍可用（§7.8） |
 | 前端 | Vue 3 + Element Plus | React、Ant Design Vue | 企业后台成熟方案；组件丰富 | Vite 构建、SSE 流式渲染 |
 | API 文档 | Knife4j | SpringDoc 裸 Swagger | 增强 UI、适合 Demo 与面试展示 | OpenAPI 3 标准 |
 
@@ -542,9 +564,21 @@ OSS_BUCKET=
     <groupId>org.springframework.ai</groupId>
     <artifactId>spring-ai-tika-document-reader</artifactId>
 </dependency>
+<!-- 缓存与分布式限流（V1.2 新增）：自动配置 RedissonClient / RedisConnectionFactory / StringRedisTemplate -->
+<dependency>
+    <groupId>org.redisson</groupId>
+    <artifactId>redisson-spring-boot-starter</artifactId>
+    <version>3.27.2</version> <!-- 对齐 Spring Boot 3.5.x -->
+</dependency>
 ```
 
 > **⚠️ 选型说明（V1.1 现实化）：** 早期设计计划使用 `spring-ai-alibaba-starter-dashscope` 原生 starter。实际工程改用 **`spring-ai-starter-model-openai`**，通过配置 `base-url=https://dashscope.aliyuncs.com/compatible-mode`（§5.3）以 OpenAI 兼容模式访问 DashScope。原因：避免 spring-ai-alibaba 的版本耦合，chat / embedding 走统一的 OpenAI 协议。Embedding 与 Rerank 另有自研 HTTP 网关（`DashScopeEmbeddingGateway` / `DashScopeDocumentReranker`）直接调用 DashScope 原生 API。
+
+> **⚠️ 选型说明（V1.2 Redis 引入修订）：** 选择 `redisson-spring-boot-starter` 而非裸 `spring-boot-starter-data-redis`：
+> - **Redisson 提供原生 `RRateLimiter`**（基于 Lua 脚本的令牌桶），分布式限流语义正确，无需自己写 Lua；
+> - starter 自动配置 `RedissonClient` / `RedissonConnectionFactory`（实现 Spring `RedisConnectionFactory`）/ `StringRedisTemplate`，业务层只额外声明 `RedisTemplate<String,Object>` bean（§7.8.1）；
+> - starter 已传递依赖 `spring-boot-starter-data-redis` 与 Lettuce，无需重复引入；
+> - **测试 profile 排除**：`RedissonAutoConfigurationV2`（注意 V2 后缀，对应 redisson 3.27.2 的实际注册类名），保证集成测试零 Redis 依赖。
 
 ### 5.3 AI 模型配置要点
 
@@ -625,6 +659,28 @@ knowsource:
 - **决策：** MVP 统一使用 `JdbcClient` 编写业务 SQL；结构变更全部通过 Flyway 版本脚本管理。
 - **理由：** RAG 核心链路需要精确控制 SQL：`doc_id + doc_version` 过滤、Outbox claim/lock、批量 chunk/vector 写入、发布状态机和 QaTrace 记录都不适合被 ORM 隐式行为遮蔽。
 - **代价：** 普通 CRUD 代码比 JPA Repository 更显式；如果 MVP 后出现大量后台管理 CRUD，可在非 RAG 核心模块局部引入 JPA，但不迁移检索、Outbox、向量写入链路。
+
+#### ADR-007：引入 Redis + 优雅降级（V1.2）
+
+- **背景：** 单实例下 `AiProviderResilience` 的本地 `RateLimiter` / `Bulkhead` 工作良好，但水平扩容时实际 QPS = N × 配置值，会触发 DashScope 供应商限流；同时 `CurrentUserService.findByUsername`（每鉴权请求一次 DB）与 `KnowledgeBaseService.requireKbMember` 等成员校验是热路径，每请求一次 DB。
+- **决策：** 引入 Redis（Redisson 3.27.2）承担三类职责——
+  1. **P0 分布式限流**：`RRateLimiter` 跨实例令牌桶，前置在 `AiProviderResilience.execute()` 链最外层；
+  2. **P1 用户缓存**：`user:<username>` → `CurrentUser` record，TTL 30s，`AuthService.updateUserRole` 写后 evict；
+  3. **P1 KB 成员缓存**：`kbmember:<kbId>:<userId>` → 角色字符串，TTL 60s，`addMember` / `updateMember` / `removeMember` / `delete(kb)` 写后 evict。
+- **理由：** Redisson 提供原生 `RRateLimiter`（Lua 脚本实现的令牌桶，语义正确）；starter 自动配置 `RedissonConnectionFactory` 桥接到 Spring Data Redis 抽象，`RedisTemplate` 可直接复用；与 `spring-boot-starter-data-redis` 生态兼容。
+- **降级矩阵（关键）：**
+
+  | 场景 | 行为 |
+  |------|------|
+  | `knowsource.redis.enabled=false` | `RedisConfig` 不生效，`CacheService.enabled=false`，`DistributedRateLimiter.isActive()=false` → **完全等价于引入前** |
+  | Redis 启动时连不上 | `ObjectProvider.getIfAvailable()` 返回 null → 所有 Redis 调用 fallthrough 到 DB / 本地限流 |
+  | Redis 运行中断开 | 单次调用 catch 异常 → log.warn + 业务降级；后续自动重连 |
+  | 用户角色变更的缓存窗口 | 最多 30s 内读到旧 `global_role`；**鉴权决策仍走 `token_version` 比较**，缓存不改变鉴权语义 |
+  | KB 成员变更的缓存窗口 | 最多 60s 内读到旧角色 |
+
+- **代价：** 引入新基础设施依赖；角色/成员变更存在 30s/60s 最终一致窗口；测试需在 `db` profile 显式排除 `RedissonAutoConfigurationV2` 以保持零 Redis 依赖。
+- **回滚开关：** `KNOWSOURCE_REDIS_ENABLED=false` 一键关闭全部 Redis 能力。
+- **实现口径（V1.2 现实化）：** 详见 `docs/architecture/Redis引入设计文档.md` 与 §7.8；测试套件 126 个用例（含新增 21 个 Redis 单元测试）全绿。
 
 ---
 
@@ -1173,9 +1229,18 @@ LIMIT :topK;
 
 #### 7.4.3 Query Embedding
 
-检索时对用户 query 单独 embed，设置 `DashScopeEmbeddingOptions.textType("query")`。
+检索时对用户 query 单独 embed，设置 `DashScopeEmbeddingOptions.textType("query")`。Query embedding 是 RAG 流程中的性能瓶颈——每次调用 DashScope API 单次延迟 100~500ms 且按次计费，而 RAG 系统存在大量「同一 query 被反复 embed」的场景：
 
-**Embedding 缓存（MVP）：** Caffeine `LoadingCache<String, float[]>`，key=`hash(normalizedQuery)`，TTL 10min，最大 1000 条；避免 MultiQuery 子 query 重复 embed。
+- **MultiQuery 改写**（[QueryRewriteService.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/chat/QueryRewriteService.java)）：原 query + 2 个改写变体，单次问答就触发 3 次 embed；
+- **不同用户问同样问题**：高频 FAQ 类 query 在多用户间重复；
+- **同一用户连续追问**：会话上下文中 query 可能被重写后再次 embed；
+- **评测/回归测试**（[EvalRunnerService.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/eval/EvalRunnerService.java)）：相同 golden set 反复跑。
+
+同一 query 的 embedding 是确定的（DashScope 模型不更新时），重复 embed 是纯浪费——缓存命中后延迟从几百毫秒降到微秒级，同时省 API 调用费用。
+
+**为什么只缓存 query 不缓存文档：** 文档入库时每条 chunk 只 embed 一次（[VectorIndexService.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/index/VectorIndexService.java)），缓存了也不会被重复命中；而 query 在上述场景下重复 embed 概率高，缓存收益大。所以 [DashScopeEmbeddingGateway.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/index/DashScopeEmbeddingGateway.java) 的 `embedQuery` 走缓存，`embedDocuments` 不走。
+
+**Embedding 缓存（已实现，三档可选）：** [EmbeddingCache.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/cache/EmbeddingCache.java) 提供 `DISABLED / L1_ONLY / L1_L2` 三档模式，由 `knowsource.cache.embedding.mode` 控制；`L1_ONLY` 仅用 Caffeine（单实例首选），`L1_L2` 在 Caffeine 之上叠加 Redisson 二进制 L2（多实例水平扩容场景）。key=`SHA-256(query)`，TTL 默认 600s，最大 1000 条。L2 用 `ByteArrayCodec` + 自实现 `float[]↔byte[]` LE 编码，4KB 向量在 Redis 仅占 ~4.1KB（JSON 序列化需 15-20KB，节省 75%）。所有 Redis 调用 try/catch + `log.warn`，失败不影响业务（与 [CacheService.java](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/cache/CacheService.java) 一致）。
 
 #### 7.4.4 轻量 Rerank（P0）
 
@@ -1309,9 +1374,11 @@ RetrievalAugmentationAdvisor 内部流水线：
 
 | 策略 | 实现 | 说明 |
 |------|------|------|
-| Caffeine 缓存 | `Cache<String,String>`，key=`ossKey`，TTL 10min，最大 500 条 | 预签名 URL 有效期 15min（§6.5），缓存 10min 留 5min 安全余量 |
-| key 维度 | 按 `ossKey`（含 docId+version）而非 docId | 不同文档/版本隔离；同文档同版本多 chunk 复用同一 URL |
-| 失效 | 文档下架（ARCHIVE）时 `cache.invalidate(ossKey)` | 服务端停止新签发 + 缓存失效；**已签发的预签名 URL 在 OSS TTL 内仍有效**，无法服务端立即撤销，依赖短 TTL（§6.5、§8.6） |
+| ~~Caffeine 缓存~~（**设计草案，未实现**） | ~~`Cache<String,String>`，key=`ossKey`，TTL 10min，最大 500 条~~ | 预签名 URL 有效期 15min（§6.5），缓存 10min 留 5min 安全余量。**实际代码 [OssSourceStorageService.previewUrl()](file:///e:/JavaProject/企业级%20RAG%20智能文档问答系统/KnowSource/src/main/java/com/knowsource/document/OssSourceStorageService.java) 每次直接 HMAC-SHA1 签名生成，无缓存**——签名是纯本地 CPU 操作（<1ms），开销可忽略，缓存收益有限。当时选 Caffeine 是因 V1.2 前项目约束为"MVP 单实例不使用 Redis"（旧 §3.4）；引入 Redis 后，多实例场景下 Caffeine 单级仍比 Redis 更合适（value 是短字符串，序列化开销小，且 URL TTL 15min 内多实例不一致影响极小） |
+| ~~key 维度~~ | ~~按 `ossKey`（含 docId+version）而非 docId~~ | ~~不同文档/版本隔离；同文档同版本多 chunk 复用同一 URL~~ |
+| ~~失效~~ | ~~文档下架（ARCHIVE）时 `cache.invalidate(ossKey)`~~ | 服务端停止新签发；**已签发的预签名 URL 在 OSS TTL 内仍有效**，无法服务端立即撤销，依赖短 TTL（§6.5、§8.6） |
+
+> **实现状态说明（V1.2 修订）：** 上表中的 Caffeine 缓存策略**未实现**，划线表示设计草案。若后续预签名 URL 生成成为热点，推荐 Caffeine 单级本地缓存（不接 Redis），原因见上表"说明"列。
 
 **③ sources 与 QaTrace 的复用**
 
@@ -1427,6 +1494,133 @@ public class RagAdvisorFactory {
 
 > **为何用工厂而非 `@Bean`：** `@Bean` 是单例，但 `Sinks.Many` 必须每次问答独立（否则不同请求的 sources 会串扰）。`RagChatService` 每次调用 `factory.create(modular)` 拿到独立的 Advisor + sink。VectorStore / ChatModel / Reranker 等无状态依赖仍由工厂持有（单例）。
 
+### 7.8 缓存与分布式限流（V1.2 新增）
+
+> **本节描述已落地的 Redis 引入实际架构。** 完整设计依据见 `docs/architecture/Redis引入设计文档.md`，本节聚焦与 RAG / 业务路径的接合点。
+
+#### 7.8.1 总览
+
+```mermaid
+flowchart LR
+    subgraph redis [Redis 7 - Redisson 3.27.2]
+        RL["ratelimit:ai:{chat,embedding,rerank}"]
+        U["user:&lt;username&gt;"]
+        KB["kbmember:&lt;kbId&gt;:&lt;userId&gt;"]
+    end
+    RL -.tryAcquire.- DRL[DistributedRateLimiter]
+    DRL --- APR[AiProviderResilience execute 链前置]
+    U -.get/put.- CS[CacheService]
+    KB -.get/put.- CS
+    CS --- CUS[CurrentUserService.findByUsername]
+    CS --- KBS[KnowledgeBaseService.cachedMemberRole]
+    CS --- AS[AuthService.updateUserRole evict]
+    CS --- KBEV[KB add/update/remove/delete evict]
+```
+
+#### 7.8.2 关键类与职责
+
+| 类 | 职责 | 降级行为 |
+|----|------|----------|
+| `config/RedisConfig` | `@ConditionalOnProperty("knowsource.redis.enabled")` 门控；仅声明 `RedisTemplate<String,Object>`（key=StringRedisSerializer, value=GenericJackson2JsonRedisSerializer）；`RedissonClient` / `RedisConnectionFactory` / `StringRedisTemplate` 由 starter 自动配置 | `enabled=false` 时 bean 不创建，下游 `ObjectProvider` 取不到 → 全部 noop |
+| `cache/CacheKeys` | 集中 key 前缀：`user:<username>`、`kbmember:<kbId>:<userId>`、`kbmember:<kbId>:*`、`ratelimit:ai:`、`semaphore:ai:` | 无（纯常量类） |
+| `cache/CacheService` | 集中封装 `get` / `put` / `evict` / `evictByPattern` / `flushDb`；构造注入 `ObjectProvider<RedisTemplate>` + `enabled` 标志 | 所有方法 try/catch + log.warn，**绝不抛异常**；`enabled=false` 或 RedisTemplate 不可用 → noop |
+| `ai/DistributedRateLimiter` | 基于 `RRateLimiter.trySetRate(OVERALL, limit, period, MILLISECONDS)` + `tryAcquire(1)`；构造注入 `ObjectProvider<RedissonClient>` + 6 个 `@Value` 限流参数（chat/embedding/rerank 各 limit + period） | `enabled=false` 或 RedissonClient 不可用 → `tryAcquire` 返回 true（放行），由本地 resilience4j 兜底 |
+
+#### 7.8.3 P0 分布式限流：`AiProviderResilience.execute()` 装饰链
+
+```
+分布式限流(Redisson, 若启用) → 本地 Bulkhead → 本地 RateLimiter(兜底) → Retry(仅 embedding) → 业务
+```
+
+- `execute()` 签名新增 `channel` 参数（`chat` / `embedding` / `rerank`）；最外层先调 `DistributedRateLimiter.tryAcquire(channel)`，未获取则抛 `AiProviderException("Distributed rate limit exceeded for " + channel)`。
+- **双构造兼容**：`AiProviderResilience` 保留 17 参 plain 构造（传 `null` 给 `ObjectProvider<DistributedRateLimiter>`），现有 `AiProviderResilienceTest` plain-JUnit 测试零改动即可编译通过。
+- Redisson 令牌桶配置：`trySetRate` 仅首次设置生效，多实例配置一致；每 refresh 周期补充 `limit-for-period` 个令牌（与 `knowsource.ai.resilience.{channel}.limit-for-period` 对齐）。
+
+#### 7.8.4 P1 用户缓存：`CurrentUserService.findByUsername`
+
+| 步骤 | 实现 |
+|------|------|
+| 读 | `cacheService.get(CacheKeys.user(username), CurrentUser.class)` 命中 → 直接返回 |
+| 未命中 | DB `SELECT id, username, global_role, token_version FROM users WHERE username=:username` |
+| 回填 | `cacheService.put(CacheKeys.user(username), user, Duration.ofSeconds(30))` |
+| 失效点 | `AuthService.updateUserRole`（UPDATE 成功后 `evict(CacheKeys.user(username))`） |
+| 不缓存负值 | 用户不存在时抛 `AuthenticationCredentialsNotFoundException`，不写缓存，避免缓存不存在用户名 |
+
+> **安全说明：** 用户缓存只缓存读路径的展示字段。**真正的鉴权决策仍走 `token_version` 比较**——缓存 30s 内即使角色变了，旧 JWT 在 access TTL（900s）内本就有效（项目原有设计）。Redis 只是把「每个请求查一次 users 表」降为「每 30s 查一次」，不改变任何鉴权语义。
+
+#### 7.8.5 P1 KB 成员缓存：`KnowledgeBaseService.cachedMemberRole`
+
+```java
+private Optional<String> cachedMemberRole(String kbId, long userId) {
+    if (!kbMemberCacheEnabled) {
+        return Optional.ofNullable(rawMemberRole(kbId, userId));  // 直查 DB
+    }
+    Optional<String> cached = cacheService.get(CacheKeys.kbMember(kbId, userId), String.class);
+    if (cached.isPresent()) return cached;
+    String role = rawMemberRole(kbId, userId);
+    if (role != null) {  // 只缓存非 null（成员存在）
+        cacheService.put(CacheKeys.kbMember(kbId, userId), role, Duration.ofSeconds(60));
+    }
+    return Optional.ofNullable(role);
+}
+```
+
+| 调用点 | 失效点 |
+|--------|--------|
+| `requireKbMember`（非 ADMIN 路径） | `addMember`（upsert，可能改角色）→ `evict(kbMember(kbId, memberUserId))` |
+| `requireKbOwnerOrAdmin`（非 ADMIN 路径） | `updateMember` → `evict(kbMember(kbId, userId))` |
+| `memberRole` | `removeMember` → `evict(kbMember(kbId, userId))` |
+| — | `delete(String kbId)`（级联删 kb_members）→ `evictByPattern(kbMemberPattern(kbId))` |
+
+> ADMIN 路径不查缓存：ADMIN 走 `knowledge_bases` 存在性检查，与成员无关，直接跳过。
+
+#### 7.8.6 配置外部化
+
+```yaml
+knowsource:
+  redis:
+    enabled: ${KNOWSOURCE_REDIS_ENABLED:true}
+    url: ${KNOWSOURCE_REDIS_URL:redis://localhost:16379}
+    password: ${KNOWSOURCE_REDIS_PASSWORD:}
+  cache:
+    user-cache-enabled: ${KNOWSOURCE_CACHE_USER_ENABLED:true}
+    user-ttl-seconds: ${KNOWSOURCE_CACHE_USER_TTL_SECONDS:30}
+    kb-member-cache-enabled: ${KNOWSOURCE_CACHE_KB_MEMBER_ENABLED:true}
+    kb-member-ttl-seconds: ${KNOWSOURCE_CACHE_KB_MEMBER_TTL_SECONDS:60}
+```
+
+#### 7.8.7 测试 profile 处理
+
+`application-db.yml` 双保险关闭 Redis：
+
+```yaml
+knowsource:
+  redis:
+    enabled: false
+  cache:
+    user-cache-enabled: false
+    kb-member-cache-enabled: false
+
+spring:
+  autoconfigure:
+    exclude:
+      # ... 现有项 ...
+      - org.redisson.spring.starter.RedissonAutoConfigurationV2   # 注意 V2 后缀！
+```
+
+> **关键坑（V1.2 实施时修复）：** redisson 3.27.2 的 `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` 注册的是 `RedissonAutoConfigurationV2`（V2 后缀），**不是**早期文档中的 `RedissonAutoConfiguration`。早期设计文档草案写的是后者，实施时被实际类名修正。
+
+#### 7.8.8 测试覆盖
+
+| 测试类 | 用例数 | 覆盖点 |
+|--------|--------|--------|
+| `CacheServiceTest` | 12 | get 命中/miss/异常、put/evict/evictByPattern、disabled flag、RedisTemplate 不可用 |
+| `DistributedRateLimiterTest` | 9 | disabled/unavailable/throwing Redisson、令牌获取/耗尽、未知 channel、`isActive()` |
+| `AiProviderResilienceTest`（既有） | 3 | plain-JUnit 构造，零改动编译通过 |
+| `AuthSecurityTest` / `KnowledgeBaseControllerTest`（既有集成） | 9+7 | `db` profile 走本地兜底路径，行为与引入前一致 |
+
+合计 **126 个测试全绿**（OSS smoke 测试需 credentials，已排除）。
+
 ---
 
 ## 8. 安全设计
@@ -1502,8 +1696,15 @@ sequenceDiagram
 | Service 层 kbId 绑定 | 检索作用域不可被客户端篡改 | `kbId` 取自 **URL 路径参数** `/api/kbs/{kbId}/chat/...`；`ChatRequest` **不含** `kbId` 字段；新会话用路径 kbId 创建，已有会话要求 `session_id + user_id + kb_id` 三者匹配 |
 | 检索层 Filter | 只召回已发布且索引已同步的版本向量 | `VectorSearchService` / `LexicalRetriever` 检索 SQL **JOIN documents** 过滤 `kb_id + status=published + d.status=PUBLISHED + d.index_status=SYNCED + d.version=vs.doc_version`（§7.4.2） |
 | 物理隔离 | 草稿永不写入向量表 | 延迟向量化（§6.2、ADR-005） |
+| 缓存层（V1.2 新增） | 用户/KB 成员缓存不绕过安全，仅作热路径优化 | `CacheService` 集中封装 + 30s/60s TTL；`token_version` 仍是鉴权决策唯一权威；Redis 失联自动降级到 DB 直查（§7.8） |
 
 > **实现口径（V1.1 现实化）：** 早期设计说「`kbId` 从 `ChatSession.kbId` 取，请求体 `kbId` 仅做一致性校验」。实际代码的安全模型是「**路径 kbId + membership 校验 + session 归属校验**」——请求体根本没有 `kbId` 字段，从源头杜绝了篡改。这与早期表述不同，但安全性等价甚至更清晰（kbId 进路径天然绑定资源）。
+
+> **缓存安全说明（V1.2 Redis 引入修订）：** Redis 引入**不改变任何鉴权语义**——
+> - 用户缓存仅缓存读路径的展示字段（`id / username / global_role / token_version`），真正的鉴权决策仍走 `token_version` 比较；
+> - 角色变更（`AuthService.updateUserRole`）后立即 `evict user:<username>`，最坏情况 30s 内旧 JWT 仍有效，但这本就是 access-token TTL（900s）的固有窗口，**Redis 没有扩大该窗口**；
+> - KB 成员缓存只缓存非 null 角色（成员存在），不存在「缓存 null 导致权限误判」风险；
+> - Redis 全失联 → `CacheService` 全部降级到 DB 直查，鉴权与权限校验完全等价于引入前。
 
 **未发布文档问答：** VIEWER 问草稿相关内容 → 向量表无记录 → 检索无结果 → 拒答（**非** metadata 过滤，而是物理不存在）。
 
@@ -1576,8 +1777,8 @@ metadata 预留字段：
 | 项 | 说明 |
 |----|------|
 | 签发 | 仅知识库成员调用预览 / sources 组装时按需签发，TTL **15min**（§6.5） |
-| 缓存 | Caffeine 缓存 10min（§7.5.4），下架时 `invalidate` |
-| **限制** | OSS 预签名 URL **一旦签发，在 TTL 过期前无法服务端撤销**；下架后只能停止新签发 + 失效缓存，已发出链接需等待 TTL 自然失效 |
+| ~~缓存~~ | ~~Caffeine 缓存 10min（§7.5.4），下架时 `invalidate`~~（**设计草案，未实现**，详见 §7.5.4 ②） |
+| **限制** | OSS 预签名 URL **一旦签发，在 TTL 过期前无法服务端撤销**；下架后只能停止新签发，已发出链接需等待 TTL 自然失效 |
 | 敏感文档 | 可缩短 TTL 至 5min；预览 API 在下架后返回 403，即使旧 URL 未过期也不应再暴露新业务入口 |
 
 ---
@@ -1985,22 +2186,30 @@ public record RagProperties(
 
 #### 11.6.2 DashScope API 限流
 
-MVP 依赖 DashScope 云端 API（chat / embedding / rerank），需在应用层做限流保护：
+MVP 依赖 DashScope 云端 API（chat / embedding / rerank），需在应用层做限流保护。**V1.2 起限流分两层：分布式层（Redisson `RRateLimiter`）+ 本地层（resilience4j）**，前者解决多实例正确性，后者作为 Redis 不可用时的本地兜底（§7.8.3）：
 
-| 调用链 | Resilience4j 注解 | 超时 | 重试 | 并发信号量 | 降级策略 |
-|--------|-------------------|------|------|------------|----------|
-| LLM Chat（流式） | `@RateLimiter` | 60s | 不重试（流式） | 10 permits | 返回 50002「AI 服务繁忙」 |
-| Embedding（批量） | `@Retry` + `@RateLimiter` | 30s | 2 次，指数退避 | 5 permits | 标记 index_status=FAILED |
-| Rerank | `@Retry` + `@RateLimiter` | 10s | 2 次 | 5 permits | 回退 ScoreTopNPostProcessor(5) |
+| 调用链 | 分布式层（Redisson） | 本地层（resilience4j） | 超时 | 重试 | 并发信号量 | 降级策略 |
+|--------|---------------------|----------------------|------|------|------------|----------|
+| LLM Chat（流式） | `RRateLimiter.tryAcquire("chat")` | `RateLimiter`（10/1s） | 60s | 不重试（流式） | Bulkhead 10 permits | 分布式层超限抛 `AiProviderException`；Redis 失联放行由本地兜底 |
+| Embedding（批量） | `RRateLimiter.tryAcquire("embedding")` | `RateLimiter`（5/1s） | 30s | 2 次，指数退避 | Bulkhead 5 permits | 标记 index_status=FAILED；本地 Retry 兜底 |
+| Rerank | `RRateLimiter.tryAcquire("rerank")` | `RateLimiter`（10/1s） | 10s | 2 次 | Bulkhead 10 permits | 回退 ScoreTopNPostProcessor(5) |
 
-**限流配置（实际用自研 `knowsource.ai.resilience.*` 配置树，非原生 resilience4j 命名空间）：**
+**装饰链顺序（实际实现，§7.8.3）：**
+
+```
+分布式限流(Redisson)  →  本地 Bulkhead  →  本地 RateLimiter  →  Retry(仅 embedding)  →  业务
+```
+
+**限流配置（实际用自研 `knowsource.ai.resilience.*` 配置树，分布式层与本地层共用同一组 limit/period）：**
 
 ```yaml
 knowsource:
+  redis:
+    enabled: ${KNOWSOURCE_REDIS_ENABLED:true}        # V1.2 新增：分布式层总开关
   ai:
     resilience:
       chat:
-        limit-for-period: 10        # 默认 10
+        limit-for-period: 10        # 默认 10，分布式 + 本地共用
         limit-refresh-period: 1s
       embedding:
         limit-for-period: 5         # 默认 5（早期文档写 20，代码为 5）
@@ -2009,7 +2218,7 @@ knowsource:
         limit-for-period: 10        # 默认 10
 ```
 
-> **面试要点：** 线程池隔离防止入库阻塞问答；限流防止 DashScope QPS 超限导致级联失败；Rerank 失败降级为按已有排序截断是优雅降级而非中断。
+> **面试要点：** 线程池隔离防止入库阻塞问答；**分布式限流（Redisson `RRateLimiter`）保证多实例时 DashScope QPS 不被放大**（N 实例 × 配置值 → 仍受 `RRateLimiter` 总闸控制）；本地 resilience4j 是 Redis 失联时的兜底；Rerank 失败降级为按已有排序截断是优雅降级而非中断。一键回滚：`KNOWSOURCE_REDIS_ENABLED=false` 即退化为纯本地限流，等价于引入前行为。
 
 ---
 
@@ -2131,44 +2340,67 @@ knowsource:
 
 ## 13. 部署与运维
 
-### 13.1 Docker Compose（仅数据库）
+### 13.1 Docker Compose（PostgreSQL + Redis）
 
-> **⚠️ 部署口径（V1.1 现实化）：** 早期设计的 compose 含 `postgres + app` 两个服务、宣称「一键部署」。**实际 `docker-compose.yml` 只有 `postgres` 服务**（容器 5432 映射到宿主 **15432**）。应用与前端需本地启动。「一键部署完整环境」当前不成立。
+> **⚠️ 部署口径（V1.2 Redis 引入修订）：** 早期 V1.1 时 compose 仅含 `postgres` 一个服务。**V1.2 起新增 `redis` 服务**（容器 6379 映射到宿主 **16379**），与 postgres 仿照同风格（healthcheck + 数据卷）。应用与前端仍需本地启动——「一键部署完整环境」仍不成立。
 
 ```yaml
-# docker-compose.yml 实际结构
+# docker-compose.yml 实际结构（V1.2）
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    ports:
-      - "15432:5432"          # 宿主 15432 → 容器 5432
+    container_name: knowsource-postgres
     environment:
       POSTGRES_DB: knowsource
       POSTGRES_USER: knowsource
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-knowsource}
+      POSTGRES_PASSWORD: knowsource
+    ports:
+      - "15432:5432"          # 宿主 15432 → 容器 5432
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - knowsource-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U knowsource -d knowsource"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:                      # V1.2 新增
+    image: redis:7-alpine
+    container_name: knowsource-redis
+    ports:
+      - "16379:6379"          # 宿主 16379 → 容器 6379，仿 postgres 用非默认端口
+    volumes:
+      - knowsource-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
-  pgdata:
+  knowsource-postgres-data:
+  knowsource-redis-data:      # V1.2 新增
 ```
 
-> **补齐方向（后续增强）：** 若要真正一键部署，需补 app 服务（多阶段 Dockerfile）+ frontend 构建/静态服务 + healthcheck + `depends_on: postgres`。
+> **Redis 关闭方式：** 不删除 compose 服务，而是在 `.env` 设置 `KNOWSOURCE_REDIS_ENABLED=false`，应用启动时 `RedisConfig` 不生效，所有 Redis 调用降级为 noop（§7.8）。
+>
+> **补齐方向（后续增强）：** 若要真正一键部署，需补 app 服务（多阶段 Dockerfile）+ frontend 构建/静态服务 + `depends_on: [postgres, redis]` + healthcheck。
 
 ### 13.2 启动步骤（当前：两进程本地启动）
 
 ```bash
-# 1) 起数据库
-cp .env.example .env   # 填写 AI_DASHSCOPE_API_KEY、JWT_SECRET 等
-docker compose up -d    # 仅启动 postgres（宿主 15432）
+# 1) 起基础设施（PostgreSQL + Redis）
+cp .env.example .env   # 填写 AI_DASHSCOPE_API_KEY、JWT_SECRET、KNOWSOURCE_REDIS_* 等
+docker compose up -d    # 启动 postgres（宿主 15432）+ redis（宿主 16379）
 
 # 2) 起后端（本地 Maven）
-mvn spring-boot:run
+mvn spring-boot:run     # 默认 KNOWSOURCE_REDIS_ENABLED=true，连本地 redis:16379
 
 # 3) 起前端（本地 Vite）
 cd frontend && npm install && npm run dev
 
 # 访问：前端 Vite dev server；后端 API http://localhost:8080/api；Knife4j http://localhost:8080/doc.html
+# 关闭 Redis：在 .env 设 KNOWSOURCE_REDIS_ENABLED=false 后重启后端
 ```
 
 ### 13.3 Flyway 与 pgvector 初始化
@@ -2334,8 +2566,17 @@ spring:
 ### 15.5 高可用集群
 
 - **场景：** 数百人并发；
-- **路径：** K8s 多副本、RocketMQ 入库、PG 读写分离、Resilience4j 限流熔断；
-- **MVP：** 单实例 + `@Async` 足够。
+- **路径：** K8s 多副本、RocketMQ 入库、PG 读写分离；
+- **已落地基础（V1.2）：**
+  - **Redis 单实例 + Redisson** 提供分布式限流（`RRateLimiter`）与缓存，多实例水平扩容时 DashScope QPS 不被放大（§7.8）；
+  - 本地 resilience4j `RateLimiter` / `Bulkhead` / `Retry` 作为 Redis 失联时的兜底；
+  - `knowsource.redis.enabled=false` 一键退化为纯单实例行为。
+- **待补（后续增强）：**
+  - **Redis 高可用**：当前是单节点，未做哨兵/集群；可升级为 Redis Sentinel 或 Cluster（Redisson 配置切 `useSentinelServers` / `useClusterServers`）；
+  - **poller 领导者选举**：`DocumentIndexEventPoller` 当前用 `AtomicBoolean` 单实例防重入，多实例时会重复拉取；可改用 Redisson `RLock` 实现分布式锁（`semaphore:ai:*` 前缀已预留，§7.8）；
+  - **eval pub/sub**：`EvalRunnerService.waitForIngestReady` 当前忙轮询；可改用 Redisson `RTopic` pub/sub 替代；
+  - **refresh-token Redis 化 + JWT 黑名单**：当前 refresh token 持久化在 `refresh_tokens` 表，登出后 accessToken 在 TTL 内仍有效；可把 token 黑名单写入 Redis 实现「立即登出」。
+  - **Caffeine + Redis 双级缓存**：当前 `CacheService` 仅 Redis 单级（§7.8），高频读路径仍每次走 Redis 网络往返（1~3ms）。可在 Redis 之上叠加 Caffeine 作为 L1 本地堆内缓存（短 TTL 兜底不一致），L1 命中 <100μs；适用于 QPS 极高且可接受秒级最终一致的热点 key（如高频用户的 `CurrentUser`、热门 KB 的成员角色）。失效方案优先用 Redisson `RTopic` pub/sub 广播 L1 失效消息，避免多实例 L1 残留旧值。**触发条件**：单实例 Redis QPS 监控告警，或 P99 读延迟 >2ms。
 
 ---
 

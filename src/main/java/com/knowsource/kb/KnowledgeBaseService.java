@@ -2,13 +2,18 @@ package com.knowsource.kb;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import com.knowsource.cache.CacheKeys;
+import com.knowsource.cache.CacheService;
 import com.knowsource.document.ResourceNotFoundException;
 import com.knowsource.security.CurrentUser;
 import com.knowsource.security.CurrentUserService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
@@ -24,14 +29,23 @@ public class KnowledgeBaseService {
     private final JdbcClient jdbcClient;
     private final CurrentUserService currentUserService;
     private final TransactionTemplate transactionTemplate;
+    private final CacheService cacheService;
+    private final boolean kbMemberCacheEnabled;
+    private final long kbMemberTtlSeconds;
 
     public KnowledgeBaseService(
             JdbcClient jdbcClient,
             CurrentUserService currentUserService,
-            TransactionTemplate transactionTemplate) {
+            TransactionTemplate transactionTemplate,
+            CacheService cacheService,
+            @Value("${knowsource.cache.kb-member-cache-enabled:true}") boolean kbMemberCacheEnabled,
+            @Value("${knowsource.cache.kb-member-ttl-seconds:60}") long kbMemberTtlSeconds) {
         this.jdbcClient = jdbcClient;
         this.currentUserService = currentUserService;
         this.transactionTemplate = transactionTemplate;
+        this.cacheService = cacheService;
+        this.kbMemberCacheEnabled = kbMemberCacheEnabled;
+        this.kbMemberTtlSeconds = kbMemberTtlSeconds;
     }
 
     @Transactional
@@ -169,6 +183,8 @@ public class KnowledgeBaseService {
             if (deleted == 0) {
                 throw new ResourceNotFoundException("Knowledge base not found.");
             }
+            // 失效：整个 KB 的成员缓存
+            cacheService.evictByPattern(CacheKeys.kbMemberPattern(kbId));
         });
     }
 
@@ -204,6 +220,8 @@ public class KnowledgeBaseService {
                 .param("userId", memberUserId)
                 .param("role", role)
                 .update();
+        // 失效：upsert 可能改了角色
+        cacheService.evict(CacheKeys.kbMember(kbId, memberUserId));
         return findMember(kbId, memberUserId);
     }
 
@@ -228,6 +246,8 @@ public class KnowledgeBaseService {
         if (updated == 0) {
             throw new ResourceNotFoundException("Knowledge base member not found.");
         }
+        // 失效：角色已变更
+        cacheService.evict(CacheKeys.kbMember(kbId, userId));
         return findMember(kbId, userId);
     }
 
@@ -248,6 +268,8 @@ public class KnowledgeBaseService {
         if (deleted == 0) {
             throw new ResourceNotFoundException("Knowledge base member not found.");
         }
+        // 失效：成员已移除
+        cacheService.evict(CacheKeys.kbMember(kbId, userId));
     }
 
     private KnowledgeBaseResponse findKnowledgeBase(String kbId) {
@@ -291,16 +313,8 @@ public class KnowledgeBaseService {
             }
             return;
         }
-        Long count = jdbcClient.sql("""
-                SELECT COUNT(*)
-                FROM kb_members
-                WHERE kb_id = :kbId AND user_id = :userId
-                """)
-                .param("kbId", kbId)
-                .param("userId", userId)
-                .query(Long.class)
-                .single();
-        if (count == 0) {
+        // 非 ADMIN 路径：查缓存的角色，空 → 不是成员
+        if (cachedMemberRole(kbId, userId).isEmpty()) {
             throw new ResourceNotFoundException("Knowledge base not found.");
         }
     }
@@ -360,15 +374,7 @@ public class KnowledgeBaseService {
             }
             return;
         }
-        String role = jdbcClient.sql("""
-                SELECT role
-                FROM kb_members
-                WHERE kb_id = :kbId AND user_id = :userId
-                """)
-                .param("kbId", kbId)
-                .param("userId", user.id())
-                .query(String.class)
-                .optional()
+        String role = cachedMemberRole(kbId, user.id())
                 .orElseThrow(() -> new ResourceNotFoundException("Knowledge base not found."));
         if (!"OWNER".equals(role)) {
             throw new AccessDeniedException("Knowledge base owner access is required.");
@@ -390,6 +396,31 @@ public class KnowledgeBaseService {
     }
 
     private String memberRole(String kbId, long userId) {
+        return cachedMemberRole(kbId, userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base member not found."));
+    }
+
+    /**
+     * 查 KB 成员角色，优先走缓存。
+     * @return 角色字符串（OWNER/EDITOR/VIEWER）；若用户不是该 KB 成员返回 Optional.empty()
+     */
+    private Optional<String> cachedMemberRole(String kbId, long userId) {
+        if (!kbMemberCacheEnabled) {
+            return Optional.ofNullable(rawMemberRole(kbId, userId));
+        }
+        Optional<String> cached = cacheService.get(CacheKeys.kbMember(kbId, userId), String.class);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        String role = rawMemberRole(kbId, userId);
+        // 只缓存存在的成员角色，不缓存 null（避免缓存"非成员"负值）
+        if (role != null) {
+            cacheService.put(CacheKeys.kbMember(kbId, userId), role, Duration.ofSeconds(kbMemberTtlSeconds));
+        }
+        return Optional.ofNullable(role);
+    }
+
+    private String rawMemberRole(String kbId, long userId) {
         return jdbcClient.sql("""
                 SELECT role
                 FROM kb_members
@@ -399,7 +430,7 @@ public class KnowledgeBaseService {
                 .param("userId", userId)
                 .query(String.class)
                 .optional()
-                .orElseThrow(() -> new ResourceNotFoundException("Knowledge base member not found."));
+                .orElse(null);
     }
 
     private void requireAnotherOwner(String kbId, long userId) {

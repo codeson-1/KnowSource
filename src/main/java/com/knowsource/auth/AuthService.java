@@ -10,6 +10,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import com.knowsource.cache.CacheKeys;
+import com.knowsource.cache.CacheService;
 import com.knowsource.security.CurrentUser;
 import com.knowsource.security.CurrentUserService;
 import com.knowsource.security.JwtService;
@@ -30,6 +32,7 @@ public class AuthService {
     private final JwtService jwtService;
     private final CurrentUserService currentUserService;
     private final TransactionTemplate transactionTemplate;
+    private final CacheService cacheService;
     private final long refreshTokenTtlDays;
 
     public AuthService(
@@ -38,12 +41,14 @@ public class AuthService {
             JwtService jwtService,
             CurrentUserService currentUserService,
             TransactionTemplate transactionTemplate,
+            CacheService cacheService,
             @Value("${knowsource.security.refresh-token-ttl-days:7}") long refreshTokenTtlDays) {
         this.jdbcClient = jdbcClient;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.currentUserService = currentUserService;
         this.transactionTemplate = transactionTemplate;
+        this.cacheService = cacheService;
         this.refreshTokenTtlDays = Math.max(1, refreshTokenTtlDays);
     }
 
@@ -178,7 +183,7 @@ public class AuthService {
         if ("VIEWER".equals(globalRole)) {
             requireNoKbManagementRole(userId);
         }
-        return jdbcClient.sql("""
+        UserResponse updated = jdbcClient.sql("""
                 UPDATE users
                 SET global_role = :globalRole,
                     token_version = token_version + 1
@@ -190,6 +195,10 @@ public class AuthService {
                 .query(AuthService::mapUserResponse)
                 .optional()
                 .orElseThrow(() -> new IllegalArgumentException("User not found."));
+        // 失效用户缓存：global_role / token_version 已变，旧缓存不再有效。
+        // register / registerFirstAdmin 是 INSERT 新用户，键不存在，无需失效。
+        cacheService.evict(CacheKeys.user(updated.username()));
+        return updated;
     }
 
     private AuthResponse issueTokens(CurrentUser user) {

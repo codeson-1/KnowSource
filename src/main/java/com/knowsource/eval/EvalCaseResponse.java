@@ -10,9 +10,14 @@ public record EvalCaseResponse(
         String expected,
         boolean refused,
         List<String> sourceTitles,
+        boolean documentHit,
         boolean citationHit,
         boolean refusalCorrect,
         boolean passed,
         String qaTraceId,
-        String sessionId) {
+        String sessionId,
+        boolean keywordHit,
+        String matchedKeyword,
+        int docRank,
+        Double faithfulness) {
 }

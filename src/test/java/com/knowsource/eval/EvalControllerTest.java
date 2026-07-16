@@ -63,8 +63,8 @@ class EvalControllerTest {
         mockMvc.perform(post("/api/eval/golden-set/run"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.kbId").isNotEmpty())
-                .andExpect(jsonPath("$.summary.totalCases").value(15))
-                .andExpect(jsonPath("$.summary.recallAt5").value(1.0d))
+                .andExpect(jsonPath("$.summary.totalCases").value(36))
+                .andExpect(jsonPath("$.summary.documentHitRate").value(1.0d))
                 .andExpect(jsonPath("$.summary.refusalAccuracy").value(1.0d))
                 .andExpect(jsonPath("$.cases[0].qaTraceId").isNotEmpty())
                 .andExpect(jsonPath("$.reportPath").value("docs/eval/report.md"));
@@ -72,7 +72,7 @@ class EvalControllerTest {
         Long traceRows = jdbcClient.sql("SELECT COUNT(*) FROM qa_traces")
                 .query(Long.class)
                 .single();
-        assertThat(traceRows).isGreaterThanOrEqualTo(15);
+        assertThat(traceRows).isGreaterThanOrEqualTo(36);
 
         mockMvc.perform(get("/api/eval/golden-set/report"))
                 .andExpect(status().isOk())
@@ -136,7 +136,7 @@ class EvalControllerTest {
                     "年假", "假期", "休年假", "直属经理", "hr", "复核", "全职")) {
                 categories.add("leave");
             }
-            if (containsAny(normalized, "carryover", "unused", "结转", "未使用")) {
+            if (containsAny(normalized, "carryover", "unused", "结转", "未使用", "leave-2024")) {
                 categories.add("leave");
             }
             if (containsAny(normalized,
@@ -144,7 +144,7 @@ class EvalControllerTest {
                     "安全", "工牌", "办公区", "访客", "前台", "丢失", "门禁")) {
                 categories.add("security");
             }
-            if (containsAny(normalized, "incident", "24 hours", "事件", "24 小时", "24小时", "上报")) {
+            if (containsAny(normalized, "incident", "24 hours", "事件", "24 小时", "24小时", "上报", "p0")) {
                 categories.add("security");
             }
             if (containsAny(normalized,
@@ -152,11 +152,11 @@ class EvalControllerTest {
                     "报销", "票据", "财务", "住宿", "额度", "餐费", "交通")) {
                 categories.add("expense");
             }
-            if (containsAny(normalized, "limit", "800")) {
+            if (containsAny(normalized, "limit", "800", "exp")) {
                 categories.add("expense");
             }
             if (containsAny(normalized,
-                    "remote", "work", "week",
+                    "remote", "work", "week", "vpn",
                     "远程", "办公", "每周", "团队负责人", "线下培训")) {
                 categories.add("remote");
             }

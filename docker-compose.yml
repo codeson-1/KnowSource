@@ -16,5 +16,19 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    container_name: knowsource-redis
+    ports:
+      - "16379:6379"
+    volumes:
+      - knowsource-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   knowsource-postgres-data:
+  knowsource-redis-data:

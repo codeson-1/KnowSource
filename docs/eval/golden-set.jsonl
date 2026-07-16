@@ -13,3 +13,24 @@
 {"id":"stock_code","question":"公司的股票代码是什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
 {"id":"cafeteria_menu","question":"明天食堂菜单是什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
 {"id":"ocr_scan_contract","question":"扫描合同上的印章写了什么？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"exact_doc_code_exp","question":"EXP-2024-03 是什么制度?","expectedDocTitle":"报销制度","expectedKeywords":["EXP-2024-03"],"outOfScope":false}
+{"id":"exact_doc_code_leave","question":"LEAVE-2024-01 规定了什么?","expectedDocTitle":"年假制度","expectedKeywords":["LEAVE-2024-01"],"outOfScope":false}
+{"id":"exact_amount_threshold","question":"单笔超过多少钱的报销需要附加情况说明?","expectedDocTitle":"报销制度","expectedKeywords":["5000"],"outOfScope":false}
+{"id":"exact_table_lodging","question":"住宿报销一线城市上浮多少?","expectedDocTitle":"报销制度","expectedKeywords":["20"],"outOfScope":false}
+{"id":"exact_vpn_abbr","question":"VPN 断线需要在多少分钟内上报?","expectedDocTitle":"远程办公制度","expectedKeywords":["15"],"outOfScope":false}
+{"id":"exact_p0_response","question":"P0 事件的响应时限是多少分钟?","expectedDocTitle":"办公安全制度","expectedKeywords":["30"],"outOfScope":false}
+{"id":"exact_table_meal","question":"餐费报销标准是多少？","expectedDocTitle":"报销制度","expectedKeywords":["120"],"outOfScope":false}
+{"id":"exact_table_transport","question":"市内交通每天报销上限是多少？","expectedDocTitle":"报销制度","expectedKeywords":["300"],"outOfScope":false}
+{"id":"boundary_ten_year_leave","question":"工龄满10年的员工每年有几天年假？","expectedDocTitle":"年假制度","expectedKeywords":["15 天"],"outOfScope":false}
+{"id":"boundary_carryover_vp","question":"跨年结转未使用的年假需要谁审批？","expectedDocTitle":"年假制度","expectedKeywords":["VP"],"outOfScope":false}
+{"id":"negative_remote_restriction","question":"什么情况下不能远程办公？","expectedDocTitle":"远程办公制度","expectedKeywords":["线下培训"],"outOfScope":false}
+{"id":"negative_leave_hr_threshold","question":"连续请假不超过几天可以不经过HR复核？","expectedDocTitle":"年假制度","expectedKeywords":["5 天"],"outOfScope":false}
+{"id":"exact_badge_fee","question":"安全工牌补办需要多少钱？","expectedDocTitle":"办公安全制度","expectedKeywords":["50 元"],"outOfScope":false}
+{"id":"exact_visitor_procedure","question":"访客进入办公区需要办理什么手续？","expectedDocTitle":"办公安全制度","expectedKeywords":["前台登记"],"outOfScope":false}
+{"id":"distractor_fire_drill_freq","question":"消防疏散演练多久进行一次？","expectedDocTitle":"消防安全管理制度","expectedKeywords":["半年"],"outOfScope":false}
+{"id":"distractor_training_annual_hours","question":"每位员工每年需要完成多少学时的专业培训？","expectedDocTitle":"员工培训管理制度","expectedKeywords":["40"],"outOfScope":false}
+{"id":"distractor_procurement_gm","question":"单笔采购超过多少钱需要总经理审批？","expectedDocTitle":"采购审批制度","expectedKeywords":["10000"],"outOfScope":false}
+{"id":"distractor_backup_days","question":"核心业务数据备份保留多少天？","expectedDocTitle":"数据备份与恢复制度","expectedKeywords":["30 天"],"outOfScope":false}
+{"id":"followup_badge_fee","setupQuestion":"安全工牌丢失后需要在多少小时内上报？","question":"补办需要多少钱？","profile":"auto","expectedDocTitle":"办公安全制度","expectedKeywords":["50 元"],"outOfScope":false}
+{"id":"out_of_scope_weather","question":"明天深圳的天气怎么样？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"out_of_scope_movie","question":"最近有什么好看的电影推荐？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}

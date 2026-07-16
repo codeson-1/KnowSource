@@ -17,3 +17,6 @@ src/main/resources/application-local.yml
 
 hs_err_pid*
 replay_pid*
+
+.impeccable/
+META-INF/

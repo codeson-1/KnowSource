@@ -10,7 +10,9 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import java.util.List;
 
 import com.knowsource.ai.AiProviderResilience;
+import com.knowsource.cache.EmbeddingCache;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -101,6 +103,7 @@ class DashScopeEmbeddingGatewayTest {
         DashScopeEmbeddingGateway gateway = new DashScopeEmbeddingGateway(
                 builder,
                 resilience(),
+                nullEmbeddingCacheProvider(),
                 "",
                 "spring-ai-key",
                 "",
@@ -121,11 +124,32 @@ class DashScopeEmbeddingGatewayTest {
         return new DashScopeEmbeddingGateway(
                 builder,
                 resilience(),
+                nullEmbeddingCacheProvider(),
                 "test-key",
                 "",
                 "",
                 "https://dashscope.example/v1/embeddings",
                 "text-embedding-v3");
+    }
+
+    /** 返回一个 getIfAvailable() = null 的 ObjectProvider，使 embedQuery 走 fallback（不缓存） */
+    private static ObjectProvider<EmbeddingCache> nullEmbeddingCacheProvider() {
+        return new ObjectProvider<>() {
+            @Override
+            public EmbeddingCache getObject() {
+                return null;
+            }
+
+            @Override
+            public EmbeddingCache getIfAvailable() {
+                return null;
+            }
+
+            @Override
+            public EmbeddingCache getIfUnique() {
+                return null;
+            }
+        };
     }
 
     private static String responseJson() {

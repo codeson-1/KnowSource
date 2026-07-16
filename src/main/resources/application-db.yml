@@ -1,6 +1,13 @@
 knowsource:
   demo-user:
     enabled: true
+  redis:
+    enabled: false
+  cache:
+    user-cache-enabled: false
+    kb-member-cache-enabled: false
+    embedding:
+      mode: disabled
   security:
     jwt:
       secret: db-test-only-change-me-db-test-only
@@ -76,3 +83,4 @@ spring:
       - org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration
       - org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration
       - org.springframework.ai.vectorstore.pgvector.autoconfigure.PgVectorStoreAutoConfiguration
+      - org.redisson.spring.starter.RedissonAutoConfigurationV2

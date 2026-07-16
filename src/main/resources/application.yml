@@ -8,6 +8,9 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  data:
+    redis:
+      url: ${KNOWSOURCE_REDIS_URL:redis://localhost:16379}
   servlet:
     multipart:
       max-file-size: ${KNOWSOURCE_MULTIPART_MAX_FILE_SIZE:50MB}
@@ -78,6 +81,20 @@ knowsource:
     # Disabled by default. Enable only for local/demo/test deployments via
     # KNOWSOURCE_DEMO_USER_ENABLED=true. Production must leave this unset (false).
     enabled: ${KNOWSOURCE_DEMO_USER_ENABLED:false}
+  redis:
+    enabled: ${KNOWSOURCE_REDIS_ENABLED:true}
+    url: ${KNOWSOURCE_REDIS_URL:redis://localhost:16379}
+    password: ${KNOWSOURCE_REDIS_PASSWORD:}
+  cache:
+    user-cache-enabled: ${KNOWSOURCE_CACHE_USER_ENABLED:true}
+    user-ttl-seconds: ${KNOWSOURCE_CACHE_USER_TTL_SECONDS:30}
+    kb-member-cache-enabled: ${KNOWSOURCE_CACHE_KB_MEMBER_ENABLED:true}
+    kb-member-ttl-seconds: ${KNOWSOURCE_CACHE_KB_MEMBER_TTL_SECONDS:60}
+    embedding:
+      # disabled（默认，等价于引入前）/ l1-only（单实例首选，仅 Caffeine）/ l1-l2（多实例水平扩容，Caffeine + Redisson 二进制）
+      mode: ${KNOWSOURCE_CACHE_EMBEDDING_MODE:disabled}
+      ttl-seconds: ${KNOWSOURCE_CACHE_EMBEDDING_TTL_SECONDS:600}
+      max-size: ${KNOWSOURCE_CACHE_EMBEDDING_MAX_SIZE:1000}
   security:
     jwt:
       secret: ${KNOWSOURCE_JWT_SECRET:}

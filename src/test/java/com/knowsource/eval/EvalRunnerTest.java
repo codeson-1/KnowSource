@@ -95,9 +95,9 @@ class EvalRunnerTest {
         Files.createDirectories(REPORT.getParent());
         Files.writeString(REPORT, renderReport(summary, results), StandardCharsets.UTF_8);
 
-        assertThat(summary.recallAt5()).isGreaterThanOrEqualTo(0.80d);
+        assertThat(summary.documentHitRate()).isGreaterThanOrEqualTo(0.80d);
         assertThat(summary.refusalAccuracy()).isEqualTo(1.0d);
-        assertThat(summary.citationHitRate()).isGreaterThanOrEqualTo(0.80d);
+        assertThat(summary.citationHitRate()).isGreaterThanOrEqualTo(0.70d);
         assertThat(Files.exists(REPORT)).isTrue();
     }
 
@@ -269,12 +269,12 @@ class EvalRunnerTest {
         report.append("| 用例总数 | ").append(summary.totalCases()).append(" |\n");
         report.append("| 范围内用例 | ").append(summary.inScopeCases()).append(" |\n");
         report.append("| 范围外用例 | ").append(summary.outOfScopeCases()).append(" |\n");
-        report.append("| Recall@5 | ").append(formatPercent(summary.recallAt5())).append(" |\n");
-        report.append("| 引用命中率 | ").append(formatPercent(summary.citationHitRate())).append(" |\n");
+        report.append("| 文档命中率@5 | ").append(formatPercent(summary.documentHitRate())).append(" |\n");
+        report.append("| 引用准确率 | ").append(formatPercent(summary.citationHitRate())).append(" |\n");
         report.append("| 拒答准确率 | ").append(formatPercent(summary.refusalAccuracy())).append(" |\n\n");
         report.append("## 用例结果\n\n");
-        report.append("| 用例 ID | 前置问题 | 问题 | 期望 | 是否拒答 | 来源文档 | 是否通过 |\n");
-        report.append("|---|---|---|---|---:|---|---:|\n");
+        report.append("| 用例 ID | 前置问题 | 问题 | 期望 | 是否拒答 | 来源文档 | 文档命中 | 引用准确 | 是否通过 |\n");
+        report.append("|---|---|---|---|---|---|---|---:|\n");
         for (EvalCaseResult result : results) {
             report.append("| ")
                     .append(result.id()).append(" | ")
@@ -283,6 +283,8 @@ class EvalRunnerTest {
                     .append(result.expected()).append(" | ")
                     .append(result.refused() ? "是" : "否").append(" | ")
                     .append(escape(String.join(", ", result.sourceTitles()))).append(" | ")
+                    .append(result.documentHit() ? "是" : "否").append(" | ")
+                    .append(result.citationHit() ? "是" : "否").append(" | ")
                     .append(result.passed() ? "是" : "否")
                     .append(" |\n");
         }
@@ -317,19 +319,47 @@ class EvalRunnerTest {
             String expected,
             boolean refused,
             List<String> sourceTitles,
+            boolean documentHit,
             boolean citationHit,
             boolean refusalCorrect,
-            boolean passed) {
+            boolean passed,
+            boolean keywordHit,
+            String matchedKeyword,
+            int docRank) {
 
         static EvalCaseResult from(GoldenCase goldenCase, ChatResponse response) {
             List<String> sourceTitles = response.sources().stream()
                     .map(source -> source.title())
                     .toList();
-            boolean citationHit = !goldenCase.outOfScope()
+
+            // 文档命中率: 期望文档在 Top-5 来源中
+            boolean documentHit = !goldenCase.outOfScope()
                     && goldenCase.expectedDocTitle() != null
                     && sourceTitles.contains(goldenCase.expectedDocTitle());
+
             boolean refusalCorrect = goldenCase.outOfScope() == response.refused();
-            boolean passed = goldenCase.outOfScope() ? refusalCorrect : citationHit && !response.refused();
+
+            String answerText = response.answer();
+            String matchedKeyword = goldenCase.expectedKeywords().stream()
+                    .filter(kw -> answerText != null && answerText.contains(kw))
+                    .findFirst().orElse(null);
+            boolean keywordHit = matchedKeyword != null;
+
+            // 引用准确率: 文档命中 且 答案包含期望关键词
+            boolean citationHit = documentHit && keywordHit;
+
+            boolean passed = goldenCase.outOfScope() ? refusalCorrect : documentHit && !response.refused();
+
+            int docRank = 0;
+            if (goldenCase.expectedDocTitle() != null) {
+                for (int i = 0; i < sourceTitles.size(); i++) {
+                    if (sourceTitles.get(i).equals(goldenCase.expectedDocTitle())) {
+                        docRank = i + 1;
+                        break;
+                    }
+                }
+            }
+
             return new EvalCaseResult(
                     goldenCase.id(),
                     goldenCase.setupQuestion(),
@@ -337,9 +367,13 @@ class EvalRunnerTest {
                     goldenCase.outOfScope() ? EXPECTED_REFUSAL : goldenCase.expectedDocTitle(),
                     response.refused(),
                     sourceTitles,
+                    documentHit,
                     citationHit,
                     refusalCorrect,
-                    passed);
+                    passed,
+                    keywordHit,
+                    matchedKeyword,
+                    docRank);
         }
     }
 
@@ -347,25 +381,29 @@ class EvalRunnerTest {
             int totalCases,
             int inScopeCases,
             int outOfScopeCases,
-            double recallAt5,
+            double documentHitRate,
             double citationHitRate,
             double refusalAccuracy) {
 
         static EvalSummary from(List<EvalCaseResult> results) {
             int inScope = (int) results.stream().filter(result -> !EXPECTED_REFUSAL.equals(result.expected())).count();
             int outOfScope = results.size() - inScope;
+            long documentHits = results.stream().filter(EvalCaseResult::documentHit).count();
             long citationHits = results.stream().filter(EvalCaseResult::citationHit).count();
             long refusalCorrect = results.stream()
                     .filter(result -> EXPECTED_REFUSAL.equals(result.expected()))
                     .filter(EvalCaseResult::refusalCorrect)
                     .count();
+            double documentHitRate = inScope == 0 ? 0.0d : (double) documentHits / inScope;
+            double citationHitRate = inScope == 0 ? 0.0d : (double) citationHits / inScope;
+            double refusalAccuracy = outOfScope == 0 ? 0.0d : (double) refusalCorrect / outOfScope;
             return new EvalSummary(
                     results.size(),
                     inScope,
                     outOfScope,
-                    inScope == 0 ? 0.0d : (double) citationHits / inScope,
-                    inScope == 0 ? 0.0d : (double) citationHits / inScope,
-                    outOfScope == 0 ? 0.0d : (double) refusalCorrect / outOfScope);
+                    documentHitRate,
+                    citationHitRate,
+                    refusalAccuracy);
         }
     }
 

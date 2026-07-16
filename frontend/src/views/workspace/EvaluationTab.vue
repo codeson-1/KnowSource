@@ -30,13 +30,16 @@ const latestMetrics = computed(() => ({
   outOfScopeCases: result.value
     ? String(result.value.summary.outOfScopeCases)
     : metricValue('范围外用例', 'Out-of-scope cases'),
-  recallAt5: result.value ? pct(result.value.summary.recallAt5) : metricValue('Recall@5'),
+  documentHitRate: result.value ? pct(result.value.summary.documentHitRate) : metricValue('文档命中率@5'),
   citationHitRate: result.value
     ? pct(result.value.summary.citationHitRate)
-    : metricValue('引用命中率', 'Citation hit rate'),
+    : metricValue('引用准确率', 'Citation hit rate'),
   refusalAccuracy: result.value
     ? pct(result.value.summary.refusalAccuracy)
     : metricValue('拒答准确率', 'Refusal accuracy'),
+  faithfulness: result.value
+    ? (result.value.summary.faithfulness != null ? pct(result.value.summary.faithfulness) : '-')
+    : metricValue('忠实度', 'Faithfulness'),
 }))
 const failedCases = computed(() => {
   if (result.value) {
@@ -99,12 +102,12 @@ function parseReport(markdownText: string) {
       continue
     }
 
-    if (inCaseTable && cells.length >= 7) {
+    if (inCaseTable && cells.length >= 9) {
       cases.push({
         id: cells[0],
         question: cells[2],
         sourceTitles: cells[5],
-        passed: isPositive(cells[6]),
+        passed: isPositive(cells[8]),
       })
     }
   }
@@ -185,7 +188,7 @@ onMounted(loadReport)
       <div class="section-heading">
         <div>
           <h3>基准集评测</h3>
-          <p>通过后端生产问答路径运行基准集，验证 Recall@5、引用命中和拒答准确率。</p>
+          <p>通过后端生产问答路径运行基准集，验证文档命中率@5、引用准确率、拒答准确率及忠实度。</p>
         </div>
         <el-button type="primary" :icon="VideoPlay" :loading="running" :disabled="!canRun" @click="run">
           运行评测
@@ -206,16 +209,20 @@ onMounted(loadReport)
           <strong>{{ latestMetrics.totalCases }}</strong>
         </div>
         <div class="metric">
-          <span>召回率@5</span>
-          <strong>{{ latestMetrics.recallAt5 }}</strong>
+          <span>文档命中率@5</span>
+          <strong>{{ latestMetrics.documentHitRate }}</strong>
         </div>
         <div class="metric">
-          <span>引用命中率</span>
+          <span>引用准确率</span>
           <strong>{{ latestMetrics.citationHitRate }}</strong>
         </div>
         <div class="metric">
           <span>拒答准确率</span>
           <strong>{{ latestMetrics.refusalAccuracy }}</strong>
+        </div>
+        <div class="metric">
+          <span>忠实度</span>
+          <strong>{{ latestMetrics.faithfulness }}</strong>
         </div>
       </div>
 
@@ -229,10 +236,17 @@ onMounted(loadReport)
         <el-table-column label="来源" min-width="180">
           <template #default="{ row }">{{ row.sourceTitles.join(', ') || '-' }}</template>
         </el-table-column>
+        <el-table-column label="文档命中" width="96">
+          <template #default="{ row }">
+            <span class="status-tag" :class="row.documentHit ? 'success' : 'danger'">
+              {{ row.documentHit ? '命中' : '未命中' }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column label="引用" width="96">
           <template #default="{ row }">
             <span class="status-tag" :class="row.citationHit ? 'success' : 'danger'">
-              {{ row.citationHit ? '命中' : '未命中' }}
+              {{ row.citationHit ? '准确' : '不准确' }}
             </span>
           </template>
         </el-table-column>
@@ -248,6 +262,11 @@ onMounted(loadReport)
             <span class="status-tag" :class="row.passed ? 'success' : 'danger'">
               {{ row.passed ? '通过' : '失败' }}
             </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="忠实度" width="96">
+          <template #default="{ row }">
+            {{ row.faithfulness != null ? (row.faithfulness * 100).toFixed(1) + '%' : '-' }}
           </template>
         </el-table-column>
       </el-table>
@@ -284,16 +303,20 @@ onMounted(loadReport)
             <strong>{{ latestMetrics.outOfScopeCases }}</strong>
           </div>
           <div class="report-kpi-row">
-            <span>Recall@5</span>
-            <strong>{{ latestMetrics.recallAt5 }}</strong>
+            <span>文档命中率@5</span>
+            <strong>{{ latestMetrics.documentHitRate }}</strong>
           </div>
           <div class="report-kpi-row">
-            <span>引用命中率</span>
+            <span>引用准确率</span>
             <strong>{{ latestMetrics.citationHitRate }}</strong>
           </div>
           <div class="report-kpi-row">
             <span>拒答准确率</span>
             <strong>{{ latestMetrics.refusalAccuracy }}</strong>
+          </div>
+          <div class="report-kpi-row">
+            <span>忠实度</span>
+            <strong>{{ latestMetrics.faithfulness }}</strong>
           </div>
         </div>
 

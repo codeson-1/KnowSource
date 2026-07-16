@@ -4,7 +4,11 @@ public record EvalSummaryResponse(
         int totalCases,
         int inScopeCases,
         int outOfScopeCases,
-        double recallAt5,
+        double documentHitRate,
         double citationHitRate,
-        double refusalAccuracy) {
+        double refusalAccuracy,
+        double keywordHitRate,
+        double mrr,
+        double meanDocRank,
+        Double faithfulness) {
 }

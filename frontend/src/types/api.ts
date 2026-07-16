@@ -224,9 +224,13 @@ export interface EvalSummaryResponse {
   totalCases: number
   inScopeCases: number
   outOfScopeCases: number
-  recallAt5: number
+  documentHitRate: number
   citationHitRate: number
   refusalAccuracy: number
+  keywordHitRate: number
+  mrr: number
+  meanDocRank: number
+  faithfulness: number | null
 }
 
 export interface EvalCaseResponse {
@@ -237,11 +241,16 @@ export interface EvalCaseResponse {
   expected: string
   refused: boolean
   sourceTitles: string[]
+  documentHit: boolean
   citationHit: boolean
   refusalCorrect: boolean
   passed: boolean
   qaTraceId: string | null
   sessionId: string | null
+  keywordHit: boolean
+  matchedKeyword: string | null
+  docRank: number
+  faithfulness: number | null
 }
 
 export interface EvalRunResponse {

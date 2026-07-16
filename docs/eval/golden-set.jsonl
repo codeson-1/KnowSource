@@ -34,3 +34,24 @@
 {"id":"followup_badge_fee","setupQuestion":"安全工牌丢失后需要在多少小时内上报？","question":"补办需要多少钱？","profile":"auto","expectedDocTitle":"办公安全制度","expectedKeywords":["50 元"],"outOfScope":false}
 {"id":"out_of_scope_weather","question":"明天深圳的天气怎么样？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
 {"id":"out_of_scope_movie","question":"最近有什么好看的电影推荐？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"exact_doc_code_sec","question":"SEC-2024-02 是什么制度?","expectedDocTitle":"办公安全制度","expectedKeywords":["SEC-2024-02"],"outOfScope":false}
+{"id":"exact_doc_code_remote","question":"REMOTE-2024-01 规定了什么?","expectedDocTitle":"远程办公制度","expectedKeywords":["REMOTE-2024-01"],"outOfScope":false}
+{"id":"keyword_encrypted_channel","question":"敏感数据传输必须使用什么？","expectedDocTitle":"设备与网络安全管理","expectedKeywords":["加密通道"],"outOfScope":false}
+{"id":"keyword_framework_agreement","question":"年采购额超过多少的供应商需要签订框架协议？","expectedDocTitle":"采购审批制度","expectedKeywords":["50000","框架协议"],"outOfScope":false}
+{"id":"keyword_flexible_work_hours","question":"弹性工作制员工可以在几点到岗？","expectedDocTitle":"考勤管理制度","expectedKeywords":["7:00"],"outOfScope":false}
+{"id":"keyword_backup_physical_distance","question":"备份文件异地存储物理距离不少于多少公里？","expectedDocTitle":"数据备份与恢复制度","expectedKeywords":["500 公里"],"outOfScope":false}
+{"id":"keyword_recovery_sla","question":"关键系统恢复时间不超过多少小时？","expectedDocTitle":"数据备份与恢复制度","expectedKeywords":["4 小时"],"outOfScope":false}
+{"id":"keyword_unauthorized_software","question":"公司电脑不得安装什么软件？","expectedDocTitle":"设备与网络安全管理","expectedKeywords":["未经授权"],"outOfScope":false}
+{"id":"keyword_mentor_assignment","question":"各部门需指定什么人进行岗位技能带教？","expectedDocTitle":"员工培训管理制度","expectedKeywords":["导师"],"outOfScope":false}
+{"id":"keyword_safety_officer_count","question":"消防演练时安全员需在几分钟内完成人员清点？","expectedDocTitle":"消防安全管理制度","expectedKeywords":["5 分钟"],"outOfScope":false}
+{"id":"negative_public_wifi","question":"什么网络环境下禁止访问公司内网？","expectedDocTitle":"设备与网络安全管理","expectedKeywords":["公共 Wi-Fi"],"outOfScope":false}
+{"id":"negative_resignation_data","question":"离职时需要清除什么？","expectedDocTitle":"设备与网络安全管理","expectedKeywords":["个人数据"],"outOfScope":false}
+{"id":"keyword_meeting_minutes_sync","question":"会议纪要需要在多少小时内同步至项目空间？","expectedDocTitle":"会议与协作制度","expectedKeywords":["24 小时"],"outOfScope":false}
+{"id":"out_of_scope_salary","question":"公司员工的平均工资是多少？","expectedDocTitle":null,"expectedKeywords":[],"outOfScope":true}
+{"id":"kw_expense_meal","question":"EXP-2024-03 餐费","expectedDocTitle":"报销制度","expectedKeywords":["120"],"outOfScope":false}
+{"id":"kw_security_p0","question":"SEC-2024-02 P0 响应","expectedDocTitle":"办公安全制度","expectedKeywords":["30 分钟"],"outOfScope":false}
+{"id":"kw_procurement_gm","question":"采购 总经理 10000","expectedDocTitle":"采购审批制度","expectedKeywords":["10000"],"outOfScope":false}
+{"id":"kw_training_mentor","question":"培训 导师 岗位技能","expectedDocTitle":"员工培训管理制度","expectedKeywords":["导师"],"outOfScope":false}
+{"id":"kw_network_wifi","question":"设备 网络 公共 Wi-Fi","expectedDocTitle":"设备与网络安全管理","expectedKeywords":["公共 Wi-Fi"],"outOfScope":false}
+{"id":"kw_leave_vp","question":"年假 VP 审批","expectedDocTitle":"年假制度","expectedKeywords":["VP"],"outOfScope":false}
+{"id":"kw_backup_distance","question":"备份 异地 500 公里","expectedDocTitle":"数据备份与恢复制度","expectedKeywords":["500 公里"],"outOfScope":false}

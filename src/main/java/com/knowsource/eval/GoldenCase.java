@@ -2,7 +2,7 @@ package com.knowsource.eval;
 
 import java.util.List;
 
-record GoldenCase(
+public record GoldenCase(
         String id,
         String setupQuestion,
         String question,
